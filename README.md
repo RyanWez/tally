@@ -1,0 +1,166 @@
+# 💰 Telegram Tally Bot (တဲလီ ဘော့တ်)
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Zero-Dependencies](https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-green.svg)]()
+[![License](https://img.shields.io/badge/License-MIT-orange.svg)]()
+
+A lightweight, **zero-dependency**, **zero-LLM** Telegram group amount tallying bot with robust Myanmar numeral support, phone reference tracking, message deletion detection, and strict business rule validation.
+
+---
+
+## 🌟 Key Features (အဓိက လုပ်ဆောင်ချက်များ)
+
+- **🇲🇲 Myanmar & English Numeral Parsing**: Reads amounts like `5K`, `10K`, `15,000`, `25k`, `၁၀K`, `၂၅,၀၀၀ ကျပ်`.
+- **🎯 Strict Allowed Denominations**: Only accepts allowed amounts (`5K`, `10K`, `15K`, `20K`, `25K`). Warns users if they send amounts over 25K or under 5K.
+- **🔗 Reply-Only Enforcement**: Guarantees accurate accounting by only tallying amounts sent as replies to valid phone or reference numbers.
+- **📱 Phone & Reference Normalization**: Smart resolution for Myanmar phone numbers (`09...`, `9...`, partial quote selections like `675362816` vs `09675362816`).
+- **🛡️ Duplicate Prevention**: Prevents counting the same reference number multiple times within the same local day.
+- **🔄 Message Deletion Detection**: Probes message existence in parallel background threads using invisible reactions, keeping the ledger self-healing.
+- **📊 Real-time Summaries & Pagination**: Clean HTML reports with `/total`, `/details`, and interactive paginated `/list`.
+- **⚡ Zero External Dependencies**: Built entirely using Python's Standard Library (`urllib`, `json`, `re`, `threading`, `concurrent.futures`, `pathlib`).
+
+---
+
+## 📁 Directory Structure (ဖိုဒါ ဖွဲ့စည်းပုံ)
+
+```
+tally/
+├── .env.example              # Environment variables template
+├── .gitignore                # Git ignore rules
+├── main.py                   # Primary application entrypoint & CLI runner
+├── tally.py                  # Backward-compatible wrapper
+├── README.md                 # Documentation
+├── state/                    # Local persistent state (ignored in git)
+└── src/                      # Source package
+    ├── core/
+    │   ├── config.py         # Zero-dependency .env loader, paths, TZ
+    │   └── ledger.py         # Ledger CRUD, JSON file IO, summarize, lock
+    ├── parser/
+    │   └── amount_parser.py  # Regex matching, phone normalization, reference resolution
+    └── telegram/
+        ├── client.py         # Bot API client, deletion probe & background sweep
+        └── handlers.py       # Command dispatchers, inline pagination, HTML views
+```
+
+---
+
+## 🚀 Quickstart (စတင် အသုံးပြုပုံ)
+
+### 1. Clone the repository
+```bash
+git clone https://github.com/your-username/tally.git
+cd tally
+```
+
+### 2. Configure Environment Variables
+Copy `.env.example` to `.env`:
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and fill in your Bot Token and Owner ID:
+```ini
+TALLY_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+OWNER_IDS=123456789
+ALLOWED_CHAT_IDS=-1001234567890
+REQUIRE_REPLY=true
+STRICT_DENOMINATIONS=true
+ALLOWED_DENOMINATIONS=5000,10000,15000,20000,25000
+```
+
+### 3. Run the Bot
+```bash
+# Run unit checks and self-tests
+python3 main.py --self-test
+
+# Start the long-polling bot daemon
+python3 main.py --run
+```
+
+---
+
+## ⚙️ Environment Variables Reference (`.env`)
+
+| Variable | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `TALLY_BOT_TOKEN` | `string` | *Required* | Telegram Bot API Token from [@BotFather](https://t.me/BotFather) |
+| `ALLOWED_CHAT_IDS` | `list` | `[]` | Comma-separated group chat IDs. Leave empty to allow all chats |
+| `OWNER_IDS` | `list` | `[]` | Comma-separated Telegram User IDs for bot owners |
+| `COUNT_ONLY_OWNER` | `bool` | `true` | If true, only tallies messages sent by `OWNER_IDS` |
+| `REQUIRE_REPLY` | `bool` | `true` | Only counts amounts that reply to a reference/phone message |
+| `STRICT_DENOMINATIONS` | `bool` | `true` | Strictly limits allowed values to `ALLOWED_DENOMINATIONS` |
+| `ALLOWED_DENOMINATIONS`| `list` | `5K,10K,15K,20K,25K` | Allowed denominations (e.g. `5000,10000,15000,20000,25000`) |
+| `MIN_ALLOWED_AMOUNT` | `int` | `5000` | Minimum allowed amount if strict mode is disabled |
+| `MAX_ALLOWED_AMOUNT` | `int` | `25000` | Maximum allowed amount if strict mode is disabled |
+| `CURRENCY_SUFFIX` | `string` | `""` | Optional currency label (e.g., `MMK`, `ကျပ်`) |
+| `GROUP_COMMANDS` | `string` | `anyone` | Who can run commands: `anyone` or `owner` |
+
+---
+
+## 🤖 Bot Commands Reference
+
+| Command | Description |
+| :--- | :--- |
+| `/total` | Shows today's total amount and message count |
+| `/total YYYY-MM-DD` | Shows total for a specific date (e.g., `/total 2026-08-22`) |
+| `/details` | Breakdown grouped by denomination (`25K — 10 ခု`, `10K — 5 ခု`) |
+| `/list` | Chronological listing with inline **Next / Prev** pagination |
+| `/search <ref>` | Search by phone number or reference code (e.g., `/search 09672`) |
+| `/verify` | Run an on-demand message deletion probe sweep |
+| `/dayclose` | *(Owner only)* Lock a day's ledger as an immutable snapshot |
+| `/dayopen` | *(Owner only)* Reopen a closed day's ledger |
+| `/maintenance` | *(Owner only)* Temporarily pause tallying across all chats |
+| `/active` | *(Owner only)* Resume tallying after maintenance |
+| `/help` | Display command usage guide |
+
+---
+
+## 🚢 Production Deployment (Systemd)
+
+To run the bot as a background service on Linux:
+
+1. Create a service file:
+```bash
+sudo nano /etc/systemd/system/tally.service
+```
+
+2. Add the configuration:
+```ini
+[Unit]
+Description=Telegram Tally Bot Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=your_username
+WorkingDirectory=/home/your_username/tally
+ExecStart=/usr/bin/python3 /home/your_username/tally/main.py --run
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/your_username/tally/.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+3. Enable and start:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now tally
+sudo systemctl status tally
+```
+
+---
+
+## 🧪 Testing
+
+Run the built-in test suite:
+```bash
+python3 main.py --self-test
+```
+
+---
+
+## 📄 License
+
+This project is open source and available under the [MIT License](LICENSE).
