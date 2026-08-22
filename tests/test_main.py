@@ -103,10 +103,14 @@ def run() -> int:
     failed += 0 if ok else 1
     print(f"{'ok  ' if ok else 'FAIL'} partial quote & phone normalization matching")
 
+    # Mock IDs for unit tests (isolated from production .env)
+    test_chat_id = -1001234567890
+    test_owner_id = 123456789
+
     # Store original/reply/quote text and remove an edited row when its amount
     # disappears from the edited message.
     edit_cfg = {
-        "allowed_chat_ids": [-1004417247378], "owner_ids": [8777968077],
+        "allowed_chat_ids": [test_chat_id], "owner_ids": [test_owner_id],
         "count_only_owner": True, "min_bare_amount": 1000, "max_bare_digits": 6,
         "require_reply": True,
         "allowed_denominations": [5000, 10000, 15000, 20000, 25000],
@@ -114,8 +118,8 @@ def run() -> int:
     }
     edit_ledger: dict = {}
     edit_msg = {
-        "chat": {"id": -1004417247378, "type": "supergroup"},
-        "from": {"id": 8777968077, "first_name": "owner"},
+        "chat": {"id": test_chat_id, "type": "supergroup"},
+        "from": {"id": test_owner_id, "first_name": "owner"},
         "message_id": 9001, "date": int(time.time()), "text": "25K ✅",
         "quote": {"text": "09672376152"},
         "reply_to_message": {"message_id": 7001, "text": "09672376152\nBill 25K"},
@@ -147,8 +151,8 @@ def run() -> int:
         res_10000k = handle_message(msg_10000k, edit_cfg, invalid_test_ledger, "unused", False)
         # 3. Non-reply 20K is rejected
         non_reply_msg = {
-            "chat": {"id": -1004417247378, "type": "supergroup"},
-            "from": {"id": 8777968077, "first_name": "owner"},
+            "chat": {"id": test_chat_id, "type": "supergroup"},
+            "from": {"id": test_owner_id, "first_name": "owner"},
             "message_id": 9004, "date": int(time.time()), "text": "20K",
         }
         res_non_reply = handle_message(non_reply_msg, edit_cfg, invalid_test_ledger, "unused", False)
@@ -264,7 +268,7 @@ def run() -> int:
         query_new = {
             "id": "cb1",
             "data": f"tally:list:{past_day}:1",
-            "message": {"chat": {"id": -1004417247378}, "message_id": 55},
+            "message": {"chat": {"id": test_chat_id}, "message_id": 55},
         }
         handle_callback(query_new, cb_cfg, cb_ledger, "unused")
         new_format_ok = (
@@ -291,8 +295,8 @@ def run() -> int:
     # A reference may be counted only once per local day (including sub-part quotes).
     duplicate_ledger: dict = {}
     base_msg = {
-        "chat": {"id": -1004417247378, "type": "supergroup"},
-        "from": {"id": 8777968077, "first_name": "owner"},
+        "chat": {"id": test_chat_id, "type": "supergroup"},
+        "from": {"id": test_owner_id, "first_name": "owner"},
         "message_id": 9101, "date": int(time.time()), "text": "25K ✅",
         "quote": {"text": "675362816"},
         "reply_to_message": {"message_id": 7101, "text": "09675362816"},
@@ -303,8 +307,8 @@ def run() -> int:
         first = handle_message(base_msg, edit_cfg, duplicate_ledger, "unused", False)
         # Sub-part quote or full phone quote in duplicate message
         duplicate_msg = {
-            "chat": {"id": -1004417247378, "type": "supergroup"},
-            "from": {"id": 8777968077, "first_name": "owner"},
+            "chat": {"id": test_chat_id, "type": "supergroup"},
+            "from": {"id": test_owner_id, "first_name": "owner"},
             "message_id": 9102, "date": int(time.time()), "text": "20K ✅",
             "quote": {"text": "09675362816"},
             "reply_to_message": {"message_id": 7101, "text": "09675362816"},
