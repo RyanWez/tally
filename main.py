@@ -189,8 +189,8 @@ def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool)
         send(
             token,
             chat_id,
-            f"⚠️ စာမှားပို့မိတာများလား ? အနည်းဆုံး 5K မှ အများဆုံး 25K ({allowed_str}) ပဲ ရှိသင့်တာနော်။\n"
-            f"အခု <b>{bad_str}</b> ပမာဏကိုတော့ မှတ်မထားပါဘူးခင်ဗျာ။",
+            f"⚠️ Invalid amount. Allowed amounts: {allowed_str} (min {fmt(min_allowed)}, max {fmt(max_allowed)}).\n"
+            f"The amount <b>{bad_str}</b> was not recorded.",
             reply_to=msg.get("message_id"),
         )
         print(
@@ -210,7 +210,7 @@ def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool)
         send(
             token,
             chat_id,
-            "⚠️ ပိုက်ဆံစာရင်း မှတ်သားရန် သက်ဆိုင်ရာ Phone / Reference message ကို <b>Reply</b> လုပ်ပြီး ပို့ပေးပါခင်ဗျာ။",
+            "⚠️ To record an amount, please <b>Reply</b> to the corresponding Phone / Reference message.",
             reply_to=msg.get("message_id"),
         )
         print(
@@ -263,8 +263,8 @@ def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool)
             send(
                 token,
                 chat_id,
-                f"⚠️ {duplicate_clock} မှာ {dup_ref} ကို {duplicate_amount} နဲ့ "
-                "တစ်ကြိမ် မှတ်ထားပြီးသားပါ။ ဒီ message ကို ထပ်မမှတ်ပါ။",
+                f"⚠️ {dup_ref} was already recorded at {duplicate_clock} for {duplicate_amount}. "
+                "This message will not be counted again.",
                 reply_to=msg.get("message_id"),
             )
             print(
@@ -339,23 +339,23 @@ def run(cfg: dict) -> int:
 def self_test() -> int:
     cases = [
         ("10K", [10000]),
-        ("25k ပေးလိုက်ပြီ", [25000]),
+        ("25k paid", [25000]),
         ("5K + 10K", [5000, 10000]),
         ("1.5K", [1500]),
-        ("15,000 ကျပ်", [15000]),
+        ("15,000 MMK", [15000]),
         ("20000", [20000]),
         ("2M", [2000000]),
         ("၁၀K", [10000]),
-        ("ဟုတ်ကဲ့ ok", []),
-        ("3 ခု ပေးလိုက်တယ်", []),            # bare < 1000 ignored
-        ("https://x.com/1000000 ကြည့်", []),  # url stripped
-        ("မနက် 8:30 မှာ 30K", [30000]),
+        ("yes ok", []),
+        ("gave 3 items", []),            # bare < 1000 ignored
+        ("https://x.com/1000000 check", []),  # url stripped
+        ("at 8:30 AM 30K", [30000]),
         ("5K ✅ , 25K ✅, 15K✅", [5000, 25000, 15000]),
         ("5K + 25K + 15K = 45K", [5000, 25000, 15000]),
         ("10K = 10K", [10000]),
-        ("09672571794 ကို 25K ✅", [25000]),
+        ("09672571794 25K ✅", [25000]),
         ("9672571794 25K", [25000]),
-        ("အကောင် 1234567 ကို 5K", [5000]),
+        ("account 1234567 5K", [5000]),
         ("999999", [999999]),
     ]
     failed = 0
@@ -380,11 +380,11 @@ def self_test() -> int:
         print(f"{'ok  ' if ok else 'FAIL'} label {value} -> {got!r} (want {want!r})")
 
     for text, want in [
-        ("09672376152\nဘေ 25K\nOM", "09672376152"),
-        ("09 672 376 152\nဘေ 25K\nOM", "09672376152"),
-        ("9672376152\nဘေ 25K\nOM", "09672376152"),
+        ("09672376152\nBill 25K\nOM", "09672376152"),
+        ("09 672 376 152\nBill 25K\nOM", "09672376152"),
+        ("9672376152\nBill 25K\nOM", "09672376152"),
         ("035 265", "035265"),
-        ("ဘေ 25K", None),
+        ("Bill 25K", None),
     ]:
         got = extract_reference(text)
         ok = got == want
@@ -395,7 +395,7 @@ def self_test() -> int:
     # from parent '09675362816', reply_reference must resolve to the full '09675362816'
     partial_quote = {
         "quote": {"text": "675362816"},
-        "reply_to_message": {"text": "09675362816\nဘေ 20K"},
+        "reply_to_message": {"text": "09675362816\nBill 20K"},
     }
     short_quote = {
         "quote": {"text": "5362816"},
@@ -425,7 +425,7 @@ def self_test() -> int:
         "from": {"id": 8777968077, "first_name": "owner"},
         "message_id": 9001, "date": int(time.time()), "text": "25K ✅",
         "quote": {"text": "09672376152"},
-        "reply_to_message": {"message_id": 7001, "text": "09672376152\nဘေ 25K"},
+        "reply_to_message": {"message_id": 7001, "text": "09672376152\nBill 25K"},
     }
     recorded = handle_message(edit_msg, edit_cfg, edit_ledger, "unused", False)
     stored = next(iter(edit_ledger.values()))[0]
@@ -487,20 +487,19 @@ def self_test() -> int:
         and s["messages"] == 235
         and s["items"] == 235
         and s["stale"] == 0
-        and "ပိုက်ဆံ" not in out
         and out.count("\n") + 1 == 7
     )
     failed += 0 if ok else 1
     print(f"\n{'ok  ' if ok else 'FAIL'} grouped render: 235 rows -> {out.count(chr(10)) + 1} lines")
     print(re.sub(r"</?b>|</?i>", "", out))
 
-    # One message carrying 3 figures -> 1 စောင် but 3 ခု, so the count is shown.
+    # One message carrying 3 figures -> 1 message but 3 items, so the count is shown.
     multi = [{"total": 45000, "amounts": [5000, 25000, 15000], "ts": 0, "vat": 1}]
     ms = summarize({"2026-08-22": multi}, "2026-08-22", cfg)
     mout = render_details(ms, cfg)
-    ok = ms["messages"] == 1 and ms["items"] == 3 and "ပိုက်ဆံ" in mout
+    ok = ms["messages"] == 1 and ms["items"] == 3 and "<b>3</b> items" in mout
     failed += 0 if ok else 1
-    print(f"\n{'ok  ' if ok else 'FAIL'} multi-amount footer shows ပိုက်ဆံ count")
+    print(f"\n{'ok  ' if ok else 'FAIL'} multi-amount footer shows item count")
     print(re.sub(r"</?b>|</?i>", "", mout))
 
     # A just-arrived unverified row must stay silent; only long-stale rows warn.
@@ -532,7 +531,7 @@ def self_test() -> int:
     }
     hit = render_search(search_ledger, "672 376", cfg)
     miss = render_search(search_ledger, "12345", cfg)
-    ok = "09672376152" in hit and "25,000" in hit and "မတွေ့ဘူး" in miss
+    ok = "09672376152" in hit and "25,000" in hit and "Not found" in miss
     failed += 0 if ok else 1
     print(f"{'ok  ' if ok else 'FAIL'} partial spaced search")
 

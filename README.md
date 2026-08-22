@@ -1,19 +1,19 @@
-# 💰 Telegram Tally Bot (တဲလီ ဘော့တ်)
+# 💰 Telegram Tally Bot
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
 ![Zero-Dependencies](https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-green.svg)
 ![License](https://img.shields.io/badge/License-MIT-orange.svg)
 
-A lightweight, **zero-dependency**, **zero-LLM** Telegram group amount tallying bot with robust Myanmar numeral support, phone reference tracking, message deletion detection, and strict business rule validation.
+A lightweight, **zero-dependency**, **zero-LLM** Telegram group amount tallying bot with robust numeral parsing, phone reference tracking, message deletion detection, and strict business rule validation.
 
 ---
 
-## 🌟 Key Features (အဓိက လုပ်ဆောင်ချက်များ)
+## 🌟 Key Features
 
-- **🇲🇲 Myanmar & English Numeral Parsing**: Reads amounts like `5K`, `10K`, `15,000`, `25k`, `၁၀K`, `၂၅,၀၀၀ ကျပ်`.
-- **🎯 Strict Allowed Denominations**: Only accepts allowed amounts (`5K`, `10K`, `15K`, `20K`, `25K`). Warns users if they send amounts over 25K or under 5K.
+- **🔢 Flexible Numeral & Amount Parsing**: Reads amounts like `5K`, `10K`, `15,000`, `25k`, `10K`, `25,000 MMK`, and Myanmar numerals (`၁၀K`, `၂၅,၀၀၀ ကျပ်`).
+- **🎯 Strict Allowed Denominations**: Accepts only configured amounts (`5K`, `10K`, `15K`, `20K`, `25K`). Warns users if they send out-of-range amounts.
 - **🔗 Reply-Only Enforcement**: Guarantees accurate accounting by only tallying amounts sent as replies to valid phone or reference numbers.
-- **📱 Phone & Reference Normalization**: Smart resolution for Myanmar phone numbers (`09...`, `9...`, partial quote selections like `675362816` vs `09675362816`).
+- **📱 Phone & Reference Normalization**: Smart resolution for phone numbers (`09...`, `9...`, partial quote selections like `675362816` vs `09675362816`).
 - **🛡️ Duplicate Prevention**: Prevents counting the same reference number multiple times within the same local day.
 - **🔄 Message Deletion Detection**: Probes message existence in parallel background threads using invisible reactions, keeping the ledger self-healing.
 - **📊 Real-time Summaries & Pagination**: Clean HTML reports with `/total`, `/details`, and interactive paginated `/list`.
@@ -21,7 +21,7 @@ A lightweight, **zero-dependency**, **zero-LLM** Telegram group amount tallying 
 
 ---
 
-## 📁 Directory Structure (ဖိုဒါ ဖွဲ့စည်းပုံ)
+## 📁 Directory Structure
 
 ```text
 tally/
@@ -44,7 +44,7 @@ tally/
 
 ---
 
-## 🚀 Quickstart (စတင် အသုံးပြုပုံ)
+## 🚀 Quickstart
 
 ### 1. Clone the repository
 
@@ -97,7 +97,7 @@ python3 main.py --run
 | `ALLOWED_DENOMINATIONS` | `list` | `5K,10K,15K,20K,25K` | Allowed denominations (e.g. `5000,10000,15000,20000,25000`) |
 | `MIN_ALLOWED_AMOUNT` | `int` | `5000` | Minimum allowed amount if strict mode is disabled |
 | `MAX_ALLOWED_AMOUNT` | `int` | `25000` | Maximum allowed amount if strict mode is disabled |
-| `CURRENCY_SUFFIX` | `string` | `""` | Optional currency label (e.g., `MMK`, `ကျပ်`) |
+| `CURRENCY_SUFFIX` | `string` | `""` | Optional currency label (e.g., `MMK`, `Ks`) |
 | `GROUP_COMMANDS` | `string` | `anyone` | Who can run commands: `anyone` or `owner` |
 
 ---
@@ -108,7 +108,7 @@ python3 main.py --run
 | :--- | :--- |
 | `/total` | Shows today's total amount and message count |
 | `/total YYYY-MM-DD` | Shows total for a specific date (e.g., `/total 2026-08-22`) |
-| `/details` | Breakdown grouped by denomination (`25K — 10 ခု`, `10K — 5 ခု`) |
+| `/details` | Breakdown grouped by denomination (e.g., `25K — 10 items`, `10K — 5 items`) |
 | `/list` | Chronological listing with inline **Next / Prev** pagination |
 | `/search <ref>` | Search by phone number or reference code (e.g., `/search 09672`) |
 | `/verify` | Run an on-demand message deletion probe sweep |

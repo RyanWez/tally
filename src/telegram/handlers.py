@@ -27,19 +27,19 @@ from src.telegram.client import (
 LIST_PAGE_SIZE = 20
 
 HELP = (
-    "💰 <b>Tally bot</b>\n"
-    "message ထဲ 10K / 25K / 5,000 ရေးလိုက်တာတွေကို နေ့စဉ် မှတ်တယ်။\n"
-    "Edit လုပ်တာ၊ ဖျက်လိုက်တာ အလိုအလျောက် ပြန်ချိန်တယ်။\n\n"
-    "/total — message အရေအတွက် + စုစုပေါင်း\n"
-    "/details — ပိုက်ဆံအလိုက် အုပ်စုခွဲ (5K — 10 ခု ...)\n"
-    "/list — message တစ်စောင်ချင်း (page ၄၀ စောင်စီ)\n"
-    "/search 09672 — phone/reference number ရှာ\n"
-    "/verify — ဖျက်လိုက်တာတွေ အကုန်စစ် (ကြာနိုင်)\n"
-    "/dayclose — ဒီနေ့စာရင်းပိတ်\n"
-    "/dayopen — ပိတ်ထားတဲ့နေ့ကို ပြန်ဖွင့်\n"
-    "/maintenance — tally ခဏရပ်\n"
-    "/active — tally ပြန်ဖွင့်\n"
-    "/total 2026-08-21 — ရက်ရွေးကြည့်"
+    "💰 <b>Tally Bot</b>\n"
+    "Daily expense & amount tallying from chat messages (e.g. 10K / 25K / 5,000).\n"
+    "Automatically handles edits and message deletions.\n\n"
+    "/total — Message count + grand total\n"
+    "/details — Grouped breakdown by denomination (5K — 10 items ...)\n"
+    "/list — Message log (paginated)\n"
+    "/search 09672 — Search by phone/reference number\n"
+    "/verify — Probe & clean up deleted messages\n"
+    "/dayclose — Close today's ledger (Owner only)\n"
+    "/dayopen — Reopen a closed day's ledger (Owner only)\n"
+    "/maintenance — Temporarily pause tallying (Owner only)\n"
+    "/active — Resume tallying (Owner only)\n"
+    "/total 2026-08-21 — View total for a specific date"
 )
 
 
@@ -47,17 +47,18 @@ def _footer(s: dict, cfg: dict) -> str:
     """Warn only when verification is lagging, never for freshly-arrived rows."""
     if not s.get("stale"):
         return ""
-    return f"\n<i>⚠️ {s['stale']} စောင် မစစ်ရသေး (Telegram မအဆင်ပြေ)</i>"
+    count = s["stale"]
+    return f"\n<i>⚠️ {count} message{'s' if count != 1 else ''} unverified (Telegram connection issue)</i>"
 
 
 def render_total(s: dict, cfg: dict) -> str:
     cur = cfg["currency_suffix"]
     if not s["messages"]:
-        return f"📊 {s['day']} — ဒီနေ့ ပိုက်ဆံ message မရှိသေးဘူး။"
+        return f"📊 {s['day']} — No tally messages recorded yet."
     return (
         f"📊 <b>{s['day']}</b>\n"
-        f"Message: <b>{s['messages']}</b> စောင်\n"
-        f"စုစုပေါင်း: <b>{fmt(s['total'], cur)}</b>" + _footer(s, cfg)
+        f"Messages: <b>{s['messages']}</b>\n"
+        f"Total: <b>{fmt(s['total'], cur)}</b>" + _footer(s, cfg)
     )
 
 
@@ -65,15 +66,15 @@ def render_details(s: dict, cfg: dict) -> str:
     """Grouped breakdown: one line per denomination, not per message."""
     cur = cfg["currency_suffix"]
     if not s["messages"]:
-        return f"📋 {s['day']} — ဘာမှ မရှိသေးဘူး။"
-    lines = [f"📋 <b>{s['day']} အသေးစိတ်</b>"]
+        return f"📋 {s['day']} — No records found."
+    lines = [f"📋 <b>{s['day']} Details</b>"]
     for amount in sorted(s["buckets"], reverse=True):
         count = s["buckets"][amount]
-        lines.append(f"{label(amount)} — <b>{count}</b> ခု = {fmt(amount * count, cur)}")
-    extra = f" • ပိုက်ဆံ <b>{s['items']}</b> ခု" if s["items"] != s["messages"] else ""
+        lines.append(f"{label(amount)} — <b>{count}</b> item{'s' if count != 1 else ''} = {fmt(amount * count, cur)}")
+    extra = f" • <b>{s['items']}</b> item{'s' if s['items'] != 1 else ''}" if s["items"] != s["messages"] else ""
     lines.append(
-        f"— — —\nMessage <b>{s['messages']}</b> စောင်{extra}\n"
-        f"စုစုပေါင်း <b>{fmt(s['total'], cur)}</b>" + _footer(s, cfg)
+        f"— — —\nMessages: <b>{s['messages']}</b>{extra}\n"
+        f"Total: <b>{fmt(s['total'], cur)}</b>" + _footer(s, cfg)
     )
     return "\n".join(lines)
 
@@ -86,10 +87,10 @@ def list_keyboard(s: dict, page: int, page_size: int = LIST_PAGE_SIZE) -> dict:
     total_pages = list_page_count(s, page_size)
     buttons = []
     if page > 1:
-        buttons.append({"text": "‹ အဟောင်း", "callback_data": f"tally:list:{page - 1}"})
+        buttons.append({"text": "‹ Prev", "callback_data": f"tally:list:{page - 1}"})
     buttons.append({"text": f"{page}/{total_pages}", "callback_data": "tally:noop"})
     if page < total_pages:
-        buttons.append({"text": "အသစ် ›", "callback_data": f"tally:list:{page + 1}"})
+        buttons.append({"text": "Next ›", "callback_data": f"tally:list:{page + 1}"})
     return {"inline_keyboard": [buttons]}
 
 
@@ -98,16 +99,16 @@ def render_list(s: dict, cfg: dict, page: int = 1, page_size: int = LIST_PAGE_SI
     cur = cfg["currency_suffix"]
     rows = s["rows"]
     if not rows:
-        return f"📝 {s['day']} — ဘာမှ မရှိသေးဘူး။"
+        return f"📝 {s['day']} — No records found."
     page = max(1, int(page))
     total_pages = list_page_count(s, page_size)
     if page > total_pages:
-        return f"📝 {s['day']} — page {page} မရှိဘူး။ (စုစုပေါင်း {total_pages} page)"
+        return f"📝 {s['day']} — Page {page} not found. (Total {total_pages} pages)"
     end = len(rows) - (page - 1) * page_size
     start = max(0, end - page_size)
     shown = rows[start:end]
-    lines = [f"📝 <b>{s['day']} message အလိုက်</b>"]
-    lines.append(f"<i>Page {page}/{total_pages} • အသစ်ဆုံးကနေ စပြ</i>")
+    lines = [f"📝 <b>{s['day']} Message Log</b>"]
+    lines.append(f"<i>Page {page}/{total_pages} • Newest first</i>")
     for i, r in enumerate(shown, start=start + 1):
         clock = datetime.fromtimestamp(r["ts"], TZ).strftime("%H:%M")
         reference = r.get("reference_number")
@@ -115,7 +116,7 @@ def render_list(s: dict, cfg: dict, page: int = 1, page_size: int = LIST_PAGE_SI
         parts = " + ".join(label(a) for a in r["amounts"])
         detail = f" ({parts})" if len(r["amounts"]) > 1 else ""
         lines.append(f"{i}. {clock}{subject} <b>{fmt(r['total'], cur)}</b>{detail}")
-    lines.append(f"— — —\nစုစုပေါင်း <b>{fmt(s['total'], cur)}</b>")
+    lines.append(f"— — —\nTotal: <b>{fmt(s['total'], cur)}</b>")
     return "\n".join(lines)
 
 
@@ -123,7 +124,7 @@ def render_search(ledger: dict, query: str, cfg: dict, day: str | None = None) -
     """Find reference numbers by partial match across the local ledger."""
     needle = normalize_search(query)
     if len(needle) < 5 or len(needle) > 10:
-        return "🔎 Search က 5 လုံးကနေ 10 လုံးအထိ ထည့်ပါ။ Space ပါလည်း ရတယ်။"
+        return "🔎 Search query must be between 5 and 10 digits (spaces allowed)."
     cur = cfg["currency_suffix"]
     hits: list[tuple[str, dict]] = []
     for d, rows in ledger.items():
@@ -134,16 +135,17 @@ def render_search(ledger: dict, query: str, cfg: dict, day: str | None = None) -
             if ref and needle in ref:
                 hits.append((d, row))
     if not hits:
-        scope = day or "သိမ်းထားတဲ့ ledger"
-        return f"🔎 <b>{needle}</b> — {scope} ထဲမှာ မတွေ့ဘူး။"
+        scope = day or "ledger"
+        return f"🔎 <b>{needle}</b> — Not found in {scope}."
     hits.sort(key=lambda item: item[1].get("ts", 0), reverse=True)
-    lines = [f"🔎 <b>{needle}</b> — {len(hits)} ခုတွေ့တယ်"]
+    count = len(hits)
+    lines = [f"🔎 <b>{needle}</b> — Found {count} match{'es' if count != 1 else ''}"]
     for d, row in hits[:40]:
         clock = datetime.fromtimestamp(row["ts"], TZ).strftime("%m-%d %H:%M")
         ref = row.get("reference_number") or "?"
         lines.append(f"{clock} {ref} — <b>{fmt(row['total'], cur)}</b>")
     if len(hits) > 40:
-        lines.append(f"<i>နောက်ဆုံး 40 ခုသာ ပြထား ({len(hits)} ခုလုံး)</i>")
+        lines.append(f"<i>Showing latest 40 of {len(hits)} matches</i>")
     return "\n".join(lines)
 
 
@@ -233,8 +235,7 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
         send(
             token,
             chat_id,
-            f"🔍 <b>{day}</b> — {pending} စောင်ထဲက ပြန်စစ်ရမယ့် စောင်တွေကို စစ်နေတယ်၊ "
-            "ပြီးရင် ပြန်ပြောမယ်။",
+            f"🔍 <b>{day}</b> — Verifying {pending} message(s), will report when finished.",
             reply_to,
             thread_id,
         )
@@ -247,9 +248,9 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
             send(
                 token,
                 chat_id,
-                f"✅ <b>{day}</b> စစ်ပြီး — ပြန်စစ်ရမယ့် {checked} စောင်ကို စစ်၊ "
-                f"ဖျက်ထားတာ <b>{removed}</b> စောင် ဖယ်ပြီး။\n"
-                f"စုစုပေါင်း <b>{fmt(done['total'], cfg['currency_suffix'])}</b>",
+                f"✅ <b>{day}</b> Verification complete — Checked {checked} message(s), "
+                f"removed <b>{removed}</b> deleted message(s).\n"
+                f"Total: <b>{fmt(done['total'], cfg['currency_suffix'])}</b>",
                 reply_to,
                 thread_id,
             )
@@ -265,7 +266,7 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
             with LEDGER_LOCK:
                 save_ledger(ledger)
     s = summarize(ledger, day, cfg)
-    note = f"\n<i>(ဖျက်ထားတာ {removed} စောင် ဖယ်ပြီး)</i>" if removed else ""
+    note = f"\n<i>({removed} deleted message{'s' if removed != 1 else ''} removed)</i>" if removed else ""
 
     if cmd == "/total":
         send(token, chat_id, render_total(s, cfg) + note, reply_to, thread_id)
