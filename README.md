@@ -139,7 +139,96 @@ If a legacy `state/ledger.json` / `offset.json` / `control.json` exists from an 
 
 ---
 
-## 🚢 Production Deployment (Systemd)
+## 🚢 Production Deployment
+
+### Option 1: Fly.io (Recommended Cloud Deployment)
+
+Deploy the bot seamlessly to [Fly.io](https://fly.io) with persistent SQLite storage and zero idle downtime.
+
+#### 1. Install & Login to Fly CLI
+```bash
+# Install flyctl
+curl -L https://fly.io/install.sh | sh
+
+# Log in to your Fly account
+fly auth login
+```
+
+#### 2. Create a Unique App
+Fly application names are globally unique across all accounts:
+```bash
+fly apps create <your-unique-app-name>
+```
+
+#### 3. Configure `fly.toml`
+Update the `app` name in `fly.toml`:
+```toml
+app = "<your-unique-app-name>"
+primary_region = "sin"     # Singapore — low latency to Telegram & Myanmar
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  TZ = "Asia/Yangon"
+
+# Persistent SQLite volume (state/tally.db) survives deploys & restarts
+[mounts]
+  source      = "tally_data"
+  destination = "/app/state"
+
+[vm]
+  size   = "shared-cpu-1x"
+  memory = "256mb"
+```
+
+> [!NOTE]
+> There is intentionally **no `[http_service]`** section in `fly.toml` because the bot operates as an outbound long-polling worker (`getUpdates`). Do not add HTTP ports or health checks.
+
+#### 4. Create Persistent Storage Volume
+Create an encrypted 1GB volume in the Singapore region (`sin`):
+```bash
+fly volumes create tally_data --region sin --size 1
+```
+
+#### 5. Set Telegram Secrets
+Securely inject your environment variables into Fly Secrets (never commit secrets to git or docker image):
+```bash
+fly secrets set \
+  TALLY_BOT_TOKEN="your_bot_token_here" \
+  OWNER_IDS="123456789" \
+  ALLOWED_CHAT_IDS="-1001234567890"
+```
+
+#### 6. Deploy to Fly
+```bash
+fly deploy
+```
+
+> [!IMPORTANT]
+> A Telegram long-polling bot must only run **exactly 1 machine instance** to prevent duplicate message polling and Telegram `409 Conflict` errors:
+> ```bash
+> fly scale count 1
+> ```
+
+#### 7. Useful Management Commands
+```bash
+# View live streaming logs
+fly logs
+
+# Check application status & machine health
+fly status
+
+# Restart the bot daemon
+fly apps restart <your-unique-app-name>
+
+# Deploy latest code updates
+fly deploy
+```
+
+---
+
+### Option 2: Linux Systemd (VPS / Dedicated Server)
 
 To run the bot as a background service on Linux:
 
