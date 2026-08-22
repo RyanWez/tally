@@ -3,7 +3,7 @@
 # This bot only makes OUTBOUND connections (getUpdates), so there is
 # intentionally NO [http_service] section: Fly will not expect a port or
 # run health checks. Do not add an http_service block.
-app = "tally-bot"          # TODO: replace with your app name from `fly launch`
+app = "tally-check"          # TODO: replace with your app name from `fly launch`
 primary_region = "sin"     # Singapore — low latency to Myanmar & Telegram
 
 [build]
