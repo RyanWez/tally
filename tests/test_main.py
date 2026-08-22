@@ -227,10 +227,20 @@ def run() -> int:
         ]
     }
     hit = render_search(search_ledger, "672 376", cfg)
+    hit_11_spaced = render_search(search_ledger, "09 672 376 152", cfg)
     miss = render_search(search_ledger, "12345", cfg)
-    ok = "09672376152" in hit and "25,000" in hit and "Not found" in miss
+    too_short = render_search(search_ledger, "1234", cfg)
+    too_long = render_search(search_ledger, "123456789012", cfg)
+    ok = (
+        "09699996152" in hit
+        and "25,000" in hit
+        and "096999996152" in hit_11_spaced
+        and "Not found" in miss
+        and "between 5 and 11 digits" in too_short
+        and "between 5 and 11 digits" in too_long
+    )
     failed += 0 if ok else 1
-    print(f"{'ok  ' if ok else 'FAIL'} partial spaced search")
+    print(f"{'ok  ' if ok else 'FAIL'} 5-11 digits spaced search & bounds enforcement")
 
     # Pagination callbacks carry the rendered day so paging a past-day view
     # stays on that day instead of silently switching to today.

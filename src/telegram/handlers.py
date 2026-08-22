@@ -125,8 +125,8 @@ def render_list(s: dict, cfg: dict, page: int = 1, page_size: int = LIST_PAGE_SI
 def render_search(ledger: dict, query: str, cfg: dict, day: str | None = None) -> str:
     """Find reference numbers by partial match across the local ledger."""
     needle = normalize_search(query)
-    if len(needle) < 5 or len(needle) > 10:
-        return "🔎 Search query must be between 5 and 10 digits (spaces allowed)."
+    if len(needle) < 5 or len(needle) > 11:
+        return "🔎 Search query must be between 5 and 11 digits (spaces allowed)."
     cur = cfg["currency_suffix"]
     hits: list[tuple[str, dict]] = []
     for d, rows in ledger.items():
