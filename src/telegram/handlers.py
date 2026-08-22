@@ -7,14 +7,7 @@ import threading
 from datetime import datetime
 
 from src.core.config import TZ
-from src.core.ledger import (
-    LEDGER_LOCK,
-    control_state,
-    save_control,
-    save_ledger,
-    summarize,
-    today_key,
-)
+from src.core.ledger import control_state, today_key
 from src.parser.amount_parser import fmt, label, normalize_search
 from src.telegram.client import (
     answer_callback,
@@ -122,20 +115,17 @@ def render_list(s: dict, cfg: dict, page: int = 1, page_size: int = LIST_PAGE_SI
     return "\n".join(lines)
 
 
-def render_search(ledger: dict, query: str, cfg: dict, day: str | None = None) -> str:
+def render_search(db, query: str, cfg: dict, day: str | None = None) -> str:
     """Find reference numbers by partial match across the local ledger."""
     needle = normalize_search(query)
     if len(needle) < 5 or len(needle) > 11:
         return "🔎 Search query must be between 5 and 11 digits (spaces allowed)."
     cur = cfg["currency_suffix"]
-    hits: list[tuple[str, dict]] = []
-    for d, rows in ledger.items():
-        if day and d != day:
-            continue
-        for row in rows:
-            ref = normalize_search(row.get("reference_number", ""))
-            if ref and needle in ref:
-                hits.append((d, row))
+    hits: list[tuple[str, dict]] = [
+        (d, row)
+        for d, row in db.search_reference(needle)
+        if not day or d == day
+    ]
     if not hits:
         scope = day or "ledger"
         return f"🔎 <b>{needle}</b> — Not found in {scope}."
@@ -151,7 +141,7 @@ def render_search(ledger: dict, query: str, cfg: dict, day: str | None = None) -
     return "\n".join(lines)
 
 
-def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token: str) -> None:
+def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, db, token: str) -> None:
     chat_id = msg.get("chat", {}).get("id")
     thread_id = msg.get("message_thread_id")
     reply_to = msg.get("message_id")
@@ -167,7 +157,7 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
         if cmd == "/dayclose":
             if day not in control["closed_days"]:
                 control["closed_days"].append(day)
-                save_control(control)
+                db.save_control(control)
             chat_action(token, chat_id)
             send(
                 token,
@@ -179,7 +169,7 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
             )
         elif cmd == "/dayopen":
             control["closed_days"] = [d for d in control["closed_days"] if d != day]
-            save_control(control)
+            db.save_control(control)
             chat_action(token, chat_id)
             send(
                 token,
@@ -190,7 +180,7 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
             )
         elif cmd == "/maintenance":
             control["maintenance"] = True
-            save_control(control)
+            db.save_control(control)
             chat_action(token, chat_id)
             send(
                 token,
@@ -203,7 +193,7 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
             )
         else:  # /active
             control["maintenance"] = False
-            save_control(control)
+            db.save_control(control)
             chat_action(token, chat_id)
             send(
                 token,
@@ -233,7 +223,7 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
             )
             return
         chat_action(token, chat_id)
-        pending = len(ledger.get(day) or [])
+        pending = db.count_rows(day)
         send(
             token,
             chat_id,
@@ -243,10 +233,8 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
         )
 
         def worker() -> None:
-            removed, checked = verify_day(token, ledger, day, cfg, budget_seconds=None)
-            with LEDGER_LOCK:
-                save_ledger(ledger)
-            done = summarize(ledger, day, cfg)
+            removed, checked = verify_day(token, db, day, cfg, budget_seconds=None)
+            done = db.summarize(day, cfg)
             send(
                 token,
                 chat_id,
@@ -263,11 +251,8 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
     removed = 0
     chat_action(token, chat_id)
     if cfg["verify_on_read"]:
-        removed, _ = verify_day(token, ledger, day, cfg, cfg["verify_budget_seconds"])
-        if removed:
-            with LEDGER_LOCK:
-                save_ledger(ledger)
-    s = summarize(ledger, day, cfg)
+        removed, _ = verify_day(token, db, day, cfg, cfg["verify_budget_seconds"])
+    s = db.summarize(day, cfg)
     note = f"\n<i>({removed} deleted message{'s' if removed != 1 else ''} removed)</i>" if removed else ""
 
     if cmd == "/total":
@@ -285,10 +270,10 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, ledger: dict, token
             list_keyboard(s, page),
         )
     elif cmd == "/search":
-        send(token, chat_id, render_search(ledger, arg, cfg), reply_to, thread_id)
+        send(token, chat_id, render_search(db, arg, cfg), reply_to, thread_id)
 
 
-def handle_callback(query: dict, cfg: dict, ledger: dict, token: str) -> None:
+def handle_callback(query: dict, cfg: dict, db, token: str) -> None:
     """Handle inline list navigation without sending a new Telegram message."""
     answer_callback(token, query.get("id", ""))
     data = query.get("data", "")
@@ -309,6 +294,6 @@ def handle_callback(query: dict, cfg: dict, ledger: dict, token: str) -> None:
     message_id = message.get("message_id")
     if not chat_id or not message_id:
         return
-    summary = summarize(ledger, day, cfg)
+    summary = db.summarize(day, cfg)
     text = render_list(summary, cfg, page=page)
     edit_list_message(token, chat_id, message_id, text, list_keyboard(summary, page))

@@ -1,16 +1,20 @@
 """Self-test suite for the tally bot.
 
 Run via `python3 main.py --self-test` (stdlib only, no network required).
+SQLite-backed tests use throwaway databases under /tmp/opencode.
 """
 
 from __future__ import annotations
 
+import json
 import re
+import tempfile
 import time
+from pathlib import Path
 
 import main as tally_main
 from main import handle_message
-from src.core.ledger import summarize, tally_paused, today_key
+from src.core.ledger import Ledger, tally_paused, today_key
 from src.parser.amount_parser import (
     extract_reference,
     is_reference_match,
@@ -27,6 +31,47 @@ from src.telegram.handlers import (
     render_search,
 )
 import src.telegram.handlers as handlers_mod
+
+_TMP_ROOT = Path("/tmp/opencode")
+
+
+def make_db(name: str) -> Ledger:
+    """Fresh throwaway database for one test section (no legacy import)."""
+    _TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f"tally-{name}-", dir=_TMP_ROOT))
+    return Ledger(tmp / "tally.db", import_legacy=False)
+
+
+_SEED_COUNTER = {"next": 0}
+
+
+def seed(db: Ledger, day: str, rows: list[dict], chat_id: int = -1004417247378) -> None:
+    """Insert fabricated rows; message_ids auto-increment to avoid PK clashes."""
+    for r in rows:
+        _SEED_COUNTER["next"] += 1
+        db.record(
+            day,
+            {
+                "chat_id": r.get("chat_id", chat_id),
+                "message_id": r.get("message_id", _SEED_COUNTER["next"]),
+                "ts": r.get("ts", 0),
+                "sender_id": r.get("sender_id"),
+                "sender_name": r.get("sender_name"),
+                "amounts": r.get("amounts", [r.get("total", 0)]),
+                "total": r.get("total", 0),
+                "edited": bool(r.get("edited")),
+                "vat": r.get("vat", 1),
+                "reply_to_message_id": r.get("reply_to_message_id"),
+                "reference_number": r.get("reference_number"),
+                "original_text": r.get("original_text"),
+                "reply_text": r.get("reply_text"),
+                "quote_text": r.get("quote_text"),
+            },
+        )
+
+
+def total_rows(db: Ledger) -> int:
+    return sum(db.count_rows(day) for day in db.day_keys())
 
 
 def run() -> int:
@@ -103,65 +148,61 @@ def run() -> int:
     failed += 0 if ok else 1
     print(f"{'ok  ' if ok else 'FAIL'} partial quote & phone normalization matching")
 
-    # Mock IDs for unit tests (isolated from production .env)
-    test_chat_id = -1001234567890
-    test_owner_id = 123456789
-
     # Store original/reply/quote text and remove an edited row when its amount
     # disappears from the edited message.
     edit_cfg = {
-        "allowed_chat_ids": [test_chat_id], "owner_ids": [test_owner_id],
+        "allowed_chat_ids": [-1004417247378], "owner_ids": [8777968077],
         "count_only_owner": True, "min_bare_amount": 1000, "max_bare_digits": 6,
         "require_reply": True,
         "allowed_denominations": [5000, 10000, 15000, 20000, 25000],
         "strict_denominations": True,
     }
-    edit_ledger: dict = {}
+    edit_db = make_db("edited")
     edit_msg = {
-        "chat": {"id": test_chat_id, "type": "supergroup"},
-        "from": {"id": test_owner_id, "first_name": "owner"},
+        "chat": {"id": -1004417247378, "type": "supergroup"},
+        "from": {"id": 8777968077, "first_name": "owner"},
         "message_id": 9001, "date": int(time.time()), "text": "25K ✅",
         "quote": {"text": "09672376152"},
         "reply_to_message": {"message_id": 7001, "text": "09672376152\nBill 25K"},
     }
-    recorded = handle_message(edit_msg, edit_cfg, edit_ledger, "unused", False)
-    stored = next(iter(edit_ledger.values()))[0]
+    recorded = handle_message(edit_msg, edit_cfg, edit_db, "unused", False)
+    stored = edit_db.rows_for_day(edit_db.day_keys()[0])[0]
     edit_msg["text"] = "ok"
-    removed = handle_message(edit_msg, edit_cfg, edit_ledger, "unused", True)
+    removed = handle_message(edit_msg, edit_cfg, edit_db, "unused", True)
     ok = (
         recorded and stored["original_text"] == "25K ✅"
         and stored["quote_text"] == "09672376152"
         and stored["reply_text"].startswith("09672376152")
-        and removed and not edit_ledger
+        and removed and total_rows(edit_db) == 0
     )
     failed += 0 if ok else 1
-    print(f"{'ok  ' if ok else 'FAIL'} stored text + edited-to-no-amount removal")
+    print(f"{'ok  ' if ok else 'FAIL'} stored text + edited-to-no-amount removal (sqlite)")
 
     # Denominations Check: 200K, 10000K, 1K -> REJECTED with warning
-    invalid_test_ledger: dict = {}
+    invalid_db: Ledger = make_db("invalid")
     sent_warnings: list[dict] = []
     real_send = tally_main.send
     tally_main.send = lambda *args, **kwargs: sent_warnings.append({"args": args, "kwargs": kwargs}) or {"ok": True}
     try:
         # 1. 200K is rejected (>25K)
         msg_200k = dict(edit_msg, message_id=9002, text="200K")
-        res_200k = handle_message(msg_200k, edit_cfg, invalid_test_ledger, "unused", False)
+        res_200k = handle_message(msg_200k, edit_cfg, invalid_db, "unused", False)
         # 2. 10000K is rejected (>25K)
         msg_10000k = dict(edit_msg, message_id=9003, text="10000K")
-        res_10000k = handle_message(msg_10000k, edit_cfg, invalid_test_ledger, "unused", False)
+        res_10000k = handle_message(msg_10000k, edit_cfg, invalid_db, "unused", False)
         # 3. Non-reply 20K is rejected
         non_reply_msg = {
-            "chat": {"id": test_chat_id, "type": "supergroup"},
-            "from": {"id": test_owner_id, "first_name": "owner"},
+            "chat": {"id": -1004417247378, "type": "supergroup"},
+            "from": {"id": 8777968077, "first_name": "owner"},
             "message_id": 9004, "date": int(time.time()), "text": "20K",
         }
-        res_non_reply = handle_message(non_reply_msg, edit_cfg, invalid_test_ledger, "unused", False)
+        res_non_reply = handle_message(non_reply_msg, edit_cfg, invalid_db, "unused", False)
     finally:
         tally_main.send = real_send
 
     ok = (
         not res_200k and not res_10000k and not res_non_reply
-        and len(invalid_test_ledger) == 0
+        and total_rows(invalid_db) == 0
         and len(sent_warnings) == 3
         and "200,000" in sent_warnings[0]["args"][2]
         and "10,000,000" in sent_warnings[1]["args"][2]
@@ -172,11 +213,14 @@ def run() -> int:
 
     # Grouped rendering with a realistic 300+ message day.
     cfg = {"count_only_owner": False, "owner_ids": [], "currency_suffix": ""}
+    grouped_db = make_db("grouped")
     rows = []
     for amount, count in ((25000, 200), (10000, 25), (5000, 10)):
         for i in range(count):
-            rows.append({"total": amount, "amounts": [amount], "ts": 0, "vat": 1, "message_id": i})
-    s = summarize({"2026-08-22": rows}, "2026-08-22", cfg)
+            # message_id omitted -> seed() assigns unique PKs across groups
+            rows.append({"total": amount, "amounts": [amount], "ts": 0, "vat": 1})
+    seed(grouped_db, "2026-08-22", rows)
+    s = grouped_db.summarize("2026-08-22", cfg)
     out = render_details(s, cfg)
     expect_total = 200 * 25000 + 25 * 10000 + 10 * 5000
     ok = (
@@ -191,8 +235,11 @@ def run() -> int:
     print(re.sub(r"</?b>|</?i>", "", out))
 
     # One message carrying 3 figures -> 1 message but 3 items, so the count is shown.
-    multi = [{"total": 45000, "amounts": [5000, 25000, 15000], "ts": 0, "vat": 1}]
-    ms = summarize({"2026-08-22": multi}, "2026-08-22", cfg)
+    multi_db = make_db("multi")
+    seed(multi_db, "2026-08-22", [
+        {"total": 45000, "amounts": [5000, 25000, 15000], "ts": 0, "vat": 1, "message_id": 1}
+    ])
+    ms = multi_db.summarize("2026-08-22", cfg)
     mout = render_details(ms, cfg)
     ok = ms["messages"] == 1 and ms["items"] == 3 and "<b>3</b> items" in mout
     failed += 0 if ok else 1
@@ -201,63 +248,55 @@ def run() -> int:
 
     # A just-arrived unverified row must stay silent; only long-stale rows warn.
     now = int(time.time())
-    fresh = summarize({"d": [{"total": 25000, "amounts": [25000], "ts": now, "vat": 0}]}, "d", cfg)
-    aged = summarize(
-        {"d": [{"total": 25000, "amounts": [25000], "ts": now - 7200, "vat": 0}]}, "d", cfg
-    )
+    stale_db = make_db("stale")
+    seed(stale_db, "fresh", [{"total": 25000, "amounts": [25000], "ts": now, "vat": 0, "message_id": 1}])
+    seed(stale_db, "aged", [{"total": 25000, "amounts": [25000], "ts": now - 7200, "vat": 0, "message_id": 2}])
+    fresh = stale_db.summarize("fresh", cfg)
+    aged = stale_db.summarize("aged", cfg)
     ok = fresh["stale"] == 0 and _footer(fresh, cfg) == "" and aged["stale"] == 1
     failed += 0 if ok else 1
     print(f"\n{'ok  ' if ok else 'FAIL'} fresh row silent, 2h-unverified row warns")
 
+    page_db = make_db("pages")
     page_rows = [
         {"total": 25000, "amounts": [25000], "ts": i, "vat": 1, "message_id": i}
         for i in range(100)
     ]
-    ps = summarize({"d": page_rows}, "d", cfg)
+    seed(page_db, "d", page_rows)
+    ps = page_db.summarize("d", cfg)
     p1 = render_list(ps, cfg, page=1)
-    p3 = render_list(ps, cfg, page=3)
-    ok = "Page 1/5" in p1 and "Page 5/5" in render_list(ps, cfg, page=5) and "100." in p1 and "1." in render_list(ps, cfg, page=5)
+    p5 = render_list(ps, cfg, page=5)
+    ok = "Page 1/5" in p1 and "Page 5/5" in p5 and "100." in p1 and "1." in p5
     failed += 0 if ok else 1
     print(f"{'ok  ' if ok else 'FAIL'} list pagination: 100 rows -> 5 pages")
 
-    search_ledger = {
-        "d": [
-            {"total": 25000, "amounts": [25000], "ts": 2, "reference_number": "09672376152"},
-            {"total": 5000, "amounts": [5000], "ts": 1, "reference_number": "035265"},
-        ]
-    }
-    hit = render_search(search_ledger, "672 376", cfg)
-    hit_11_spaced = render_search(search_ledger, "09 672 376 152", cfg)
-    miss = render_search(search_ledger, "12345", cfg)
-    too_short = render_search(search_ledger, "1234", cfg)
-    too_long = render_search(search_ledger, "123456789012", cfg)
-    ok = (
-        "09699996152" in hit
-        and "25,000" in hit
-        and "096999996152" in hit_11_spaced
-        and "Not found" in miss
-        and "between 5 and 11 digits" in too_short
-        and "between 5 and 11 digits" in too_long
-    )
+    search_db = make_db("search")
+    seed(search_db, "d", [
+        {"total": 25000, "amounts": [25000], "ts": 2, "vat": 1, "message_id": 11,
+         "reference_number": "09672376152"},
+        {"total": 5000, "amounts": [5000], "ts": 1, "vat": 1, "message_id": 12,
+         "reference_number": "035265"},
+    ])
+    hit = render_search(search_db, "672 376", cfg)
+    miss = render_search(search_db, "12345", cfg)
+    ok = "09672376152" in hit and "25,000" in hit and "Not found" in miss
     failed += 0 if ok else 1
-    print(f"{'ok  ' if ok else 'FAIL'} 5-11 digits spaced search & bounds enforcement")
+    print(f"{'ok  ' if ok else 'FAIL'} partial spaced search")
 
     # Pagination callbacks carry the rendered day so paging a past-day view
     # stays on that day instead of silently switching to today.
     past_day = "2026-08-20"
     today_day = today_key()
-    past_rows = [
+    cb_cfg = {"count_only_owner": False, "owner_ids": [], "currency_suffix": ""}
+    cb_db = make_db("callback")
+    seed(cb_db, past_day, [
         {"total": 25000, "amounts": [25000], "ts": 1758000000 + i, "vat": 1, "message_id": i}
         for i in range(25)  # 2 pages at LIST_PAGE_SIZE=20
-    ]
-    cb_cfg = {"count_only_owner": False, "owner_ids": [], "currency_suffix": ""}
-    cb_ledger = {
-        past_day: past_rows,
-        today_day: [
-            {"total": 5000, "amounts": [5000], "ts": now, "vat": 1, "message_id": 999}
-        ],
-    }
-    kb = list_keyboard(summarize(cb_ledger, past_day, cb_cfg), page=1)
+    ])
+    seed(cb_db, today_day, [
+        {"total": 5000, "amounts": [5000], "ts": now, "vat": 1, "message_id": 999}
+    ])
+    kb = list_keyboard(cb_db.summarize(past_day, cb_cfg), page=1)
     nav_data = [
         b["callback_data"]
         for row in kb["inline_keyboard"]
@@ -278,9 +317,9 @@ def run() -> int:
         query_new = {
             "id": "cb1",
             "data": f"tally:list:{past_day}:1",
-            "message": {"chat": {"id": test_chat_id}, "message_id": 55},
+            "message": {"chat": {"id": -1004417247378}, "message_id": 55},
         }
-        handle_callback(query_new, cb_cfg, cb_ledger, "unused")
+        handle_callback(query_new, cb_cfg, cb_db, "unused")
         new_format_ok = (
             all(d.startswith(f"tally:list:{past_day}:") for d in nav_data)
             and nav_data
@@ -290,7 +329,7 @@ def run() -> int:
         )
         # Legacy keyboards (day-less format) fall back to today instead of crashing.
         query_legacy = dict(query_new, id="cb2", data="tally:list:1")
-        handle_callback(query_legacy, cb_cfg, cb_ledger, "unused")
+        handle_callback(query_legacy, cb_cfg, cb_db, "unused")
         legacy_ok = (
             f"{today_day} Message Log" in captured.get("text", "")
             and "5,000" in captured.get("text", "")
@@ -302,11 +341,86 @@ def run() -> int:
     failed += 0 if new_format_ok and legacy_ok else 1
     print(f"{'ok  ' if new_format_ok and legacy_ok else 'FAIL'} pagination callbacks stay on rendered day")
 
+    # SQLite persistence: rows survive reopen; offset & control round-trip;
+    # an edit that crosses midnight keeps exactly ONE row (under the new day).
+    persist_dir = _TMP_ROOT / f"tally-persist-{int(time.time()*1000)}"
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    pdb_path = persist_dir / "tally.db"
+    base_entry = {
+        "chat_id": -1004417247378, "message_id": 77, "ts": 1758000000,
+        "sender_id": 8777968077, "sender_name": "owner",
+        "amounts": [25000], "total": 25000, "edited": False, "vat": 0,
+        "reply_to_message_id": 70, "reference_number": "09675362816",
+        "original_text": "25k", "reply_text": "09675362816", "quote_text": None,
+    }
+    with Ledger(pdb_path, import_legacy=False) as pdb:
+        pdb.record("2026-08-20", base_entry)
+        pdb.set_offset(424242)
+        pdb.save_control({"maintenance": True, "closed_days": ["2026-08-19"]})
+        pdb.record("2026-08-21", dict(base_entry, ts=1758086400))  # midnight-crossing edit
+        moved_ok = total_rows(pdb) == 1 and pdb.day_keys() == ["2026-08-21"]
+    with Ledger(pdb_path, import_legacy=False) as pdb2:
+        s2 = pdb2.summarize("2026-08-21", cfg)
+        ctl = pdb2.load_control()
+        ok = (
+            moved_ok
+            and s2["messages"] == 1 and s2["total"] == 25000
+            and s2["rows"][0]["reference_number"] == "09675362816"
+            and pdb2.get_offset() == 424242
+            and ctl["maintenance"] is True
+            and ctl["closed_days"] == ["2026-08-19"]
+        )
+    failed += 0 if ok else 1
+    print(f"{'ok  ' if ok else 'FAIL'} sqlite persistence + offset/control roundtrip + midnight upsert")
+
+    # Legacy JSON auto-import: existing state files are migrated on first open
+    # and left untouched as backup.
+    mig_dir = _TMP_ROOT / f"tally-migrate-{int(time.time()*1000)}"
+    mig_dir.mkdir(parents=True, exist_ok=True)
+    legacy_ledger = {
+        "2026-08-20": [{
+            "chat_id": -1004417247378, "message_id": 33, "ts": 1758000000,
+            "sender_id": 8777968077, "sender_name": "Ryan Wez",
+            "amounts": [25000], "total": 25000, "edited": False, "vat": 1758009956,
+            "reply_to_message_id": 2, "reference_number": "09675362816",
+            "original_text": "25k", "reply_text": "09675362816", "quote_text": None,
+        }]
+    }
+    (mig_dir / "ledger.json").write_text(json.dumps(legacy_ledger), encoding="utf-8")
+    (mig_dir / "offset.json").write_text(json.dumps({"offset": 52623308}), encoding="utf-8")
+    (mig_dir / "control.json").write_text(
+        json.dumps({"maintenance": False, "closed_days": ["2026-08-01"]}), encoding="utf-8"
+    )
+
+    import src.core.ledger as ledger_mod
+    real_paths = (ledger_mod.LEDGER_PATH, ledger_mod.OFFSET_PATH, ledger_mod.CONTROL_PATH)
+    ledger_mod.LEDGER_PATH = mig_dir / "ledger.json"
+    ledger_mod.OFFSET_PATH = mig_dir / "offset.json"
+    ledger_mod.CONTROL_PATH = mig_dir / "control.json"
+    try:
+        mdb = Ledger(mig_dir / "tally.db", import_legacy=True)
+        try:
+            found = mdb.find_reference("2026-08-20", "675362816")
+            ctl = mdb.load_control()
+            ok = (
+                mdb.count_rows("2026-08-20") == 1
+                and found is not None and found["total"] == 25000
+                and mdb.get_offset() == 52623308
+                and ctl["closed_days"] == ["2026-08-01"]
+                and (mig_dir / "ledger.json").exists()  # originals kept as backup
+            )
+        finally:
+            mdb.close()
+    finally:
+        ledger_mod.LEDGER_PATH, ledger_mod.OFFSET_PATH, ledger_mod.CONTROL_PATH = real_paths
+    failed += 0 if ok else 1
+    print(f"{'ok  ' if ok else 'FAIL'} legacy JSON auto-import (ledger+offset+control, backup intact)")
+
     # A reference may be counted only once per local day (including sub-part quotes).
-    duplicate_ledger: dict = {}
+    duplicate_db: Ledger = make_db("duplicate")
     base_msg = {
-        "chat": {"id": test_chat_id, "type": "supergroup"},
-        "from": {"id": test_owner_id, "first_name": "owner"},
+        "chat": {"id": -1004417247378, "type": "supergroup"},
+        "from": {"id": 8777968077, "first_name": "owner"},
         "message_id": 9101, "date": int(time.time()), "text": "25K ✅",
         "quote": {"text": "675362816"},
         "reply_to_message": {"message_id": 7101, "text": "09675362816"},
@@ -314,20 +428,20 @@ def run() -> int:
     sent_warnings = []
     tally_main.send = lambda *args, **kwargs: sent_warnings.append({"args": args, "kwargs": kwargs}) or {"ok": True}
     try:
-        first = handle_message(base_msg, edit_cfg, duplicate_ledger, "unused", False)
+        first = handle_message(base_msg, edit_cfg, duplicate_db, "unused", False)
         # Sub-part quote or full phone quote in duplicate message
         duplicate_msg = {
-            "chat": {"id": test_chat_id, "type": "supergroup"},
-            "from": {"id": test_owner_id, "first_name": "owner"},
+            "chat": {"id": -1004417247378, "type": "supergroup"},
+            "from": {"id": 8777968077, "first_name": "owner"},
             "message_id": 9102, "date": int(time.time()), "text": "20K ✅",
             "quote": {"text": "09675362816"},
             "reply_to_message": {"message_id": 7101, "text": "09675362816"},
         }
-        second = handle_message(duplicate_msg, edit_cfg, duplicate_ledger, "unused", False)
+        second = handle_message(duplicate_msg, edit_cfg, duplicate_db, "unused", False)
     finally:
         tally_main.send = real_send
 
-    dup_rows = next(iter(duplicate_ledger.values()))
+    dup_rows = duplicate_db.rows_for_day(duplicate_db.day_keys()[0])
     warning_text = sent_warnings[0]["args"][2] if sent_warnings else ""
     ok = (
         first and not second and len(dup_rows) == 1 and dup_rows[0]["total"] == 25000

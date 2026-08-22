@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from src.core.ledger import LEDGER_LOCK, control_state, save_ledger, today_key
+from src.core.ledger import LEDGER_LOCK, control_state, today_key
 
 API = "https://api.telegram.org/bot{token}/{method}"
 
@@ -65,22 +65,9 @@ def message_exists(token: str, chat_id, message_id) -> bool | None:
     return None
 
 
-def _recheck_interval(row: dict, now: float, cfg: dict) -> float:
-    age = now - row.get("ts", 0)
-    if age < cfg["fresh_window_seconds"]:
-        return cfg["recheck_fresh_seconds"]
-    return cfg["recheck_old_seconds"]
-
-
-def _needs_check(row: dict, now: float, cfg: dict) -> bool:
-    if now - row.get("ts", 0) < cfg["verify_grace_seconds"]:
-        return False  # too fresh; let edits settle
-    return now - row.get("vat", 0) >= _recheck_interval(row, now, cfg)
-
-
 def verify_day(
     token: str,
-    ledger: dict,
+    db,
     day: str,
     cfg: dict,
     budget_seconds: float | None = None,
@@ -88,13 +75,18 @@ def verify_day(
     """Probe stale rows in parallel and drop deleted ones.
 
     Returns (removed, checked). Bounded by budget_seconds; None means no limit.
+    Stamps and deletions commit inside the Ledger immediately.
     """
     now = time.time()
     with LEDGER_LOCK:  # snapshot, so an incoming message can't mutate mid-scan
-        rows = list(ledger.get(day) or [])
-    if not rows:
-        return (0, 0)
-    todo = [r for r in rows if _needs_check(r, now, cfg)]
+        todo = db.rows_needing_check(
+            day,
+            now,
+            cfg["verify_grace_seconds"],
+            cfg["fresh_window_seconds"],
+            cfg["recheck_fresh_seconds"],
+            cfg["recheck_old_seconds"],
+        )
     if not todo:
         return (0, 0)
     # Never-verified rows first, then whatever was verified longest ago.
@@ -102,7 +94,8 @@ def verify_day(
 
     workers = max(1, int(cfg["verify_workers"]))
     deadline = None if budget_seconds is None else now + float(budget_seconds)
-    doomed: list[int] = []  # id() of rows to drop
+    alive_ids: list[tuple] = []
+    dead_ids: list[tuple] = []
     checked = 0
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -116,36 +109,25 @@ def verify_day(
                     batch,
                 )
             )
-            stamp = time.time()
-            # Row dicts are shared with the polling/sweep threads, so mutate
-            # them under the lock; otherwise save_ledger can serialize a
-            # half-updated row set.
-            with LEDGER_LOCK:
-                for row, alive in zip(batch, results):
-                    checked += 1
-                    if alive is False:
-                        doomed.append(id(row))
-                        print(
-                            f"[deleted] day={day} msg={row.get('message_id')} "
-                            f"total={row.get('total')} dropped",
-                            flush=True,
-                        )
-                    elif alive is True:
-                        row["vat"] = int(stamp)
-                    # alive is None -> leave vat alone, retry next pass
+            checked += len(batch)
+            for row, res in zip(batch, results):
+                key = (row.get("chat_id"), row.get("message_id"))
+                if res is False:
+                    dead_ids.append(key)
+                    print(
+                        f"[deleted] day={day} msg={row.get('message_id')} "
+                        f"total={row.get('total')} dropped",
+                        flush=True,
+                    )
+                elif res is True:
+                    alive_ids.append(key)
+                # None -> leave stamp alone, retry next pass
 
-    if doomed:
-        dead = set(doomed)
-        with LEDGER_LOCK:
-            keep = [r for r in (ledger.get(day) or []) if id(r) not in dead]
-            if keep:
-                ledger[day] = keep
-            else:
-                ledger.pop(day, None)
-    return (len(doomed), checked)
+    removed = db.apply_verify_results(alive_ids, dead_ids, int(time.time()))
+    return (removed, checked)
 
 
-def sweep_forever(token: str, ledger: dict, cfg: dict) -> None:
+def sweep_forever(token: str, db, cfg: dict) -> None:
     """Continuously re-probe rows on a background thread.
 
     Probing costs ~1s per message and Telegram serialises reactions per chat, so
@@ -158,14 +140,12 @@ def sweep_forever(token: str, ledger: dict, cfg: dict) -> None:
         try:
             days = [today_key()]
             with LEDGER_LOCK:
-                days += [d for d in sorted(ledger, reverse=True) if d not in days][:1]
+                days += [d for d in db.day_keys() if d not in days][:1]
             for day in days:
                 if day in control_state(cfg).get("closed_days", []):
                     continue  # /dayclose is an immutable snapshot
-                removed, checked = verify_day(token, ledger, day, cfg, cfg["sweep_budget_seconds"])
-                if removed:
-                    with LEDGER_LOCK:
-                        save_ledger(ledger)
+                removed, checked = verify_day(token, db, day, cfg, cfg["sweep_budget_seconds"])
+                # Deletions and stamps commit inside the Ledger; nothing to save.
                 if checked:
                     break
         except Exception as exc:  # a sweep failure must not kill the daemon

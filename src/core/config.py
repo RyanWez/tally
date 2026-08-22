@@ -11,9 +11,10 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent.parent
 STATE = BASE / "state"
 CONFIG_PATH = BASE / "config.json"
-LEDGER_PATH = STATE / "ledger.json"
-OFFSET_PATH = STATE / "offset.json"
-CONTROL_PATH = STATE / "control.json"
+LEDGER_PATH = STATE / "ledger.json"       # legacy JSON ledger (read during migration)
+OFFSET_PATH = STATE / "offset.json"       # legacy offset file (read during migration)
+CONTROL_PATH = STATE / "control.json"     # legacy control file (read during migration)
+DB_PATH = STATE / "tally.db"              # SQLite database (single source of truth)
 ENV_PATH = BASE / ".env"
 
 KEEP_DAYS = 120

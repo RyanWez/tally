@@ -29,23 +29,14 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from src.core.config import (
-    LEDGER_PATH,
-    OFFSET_PATH,
+    DB_PATH,
     TZ,
     load_config,
-    load_json,
-    save_json,
 )
 from src.core.ledger import (
     LEDGER_LOCK,
+    Ledger,
     control_state,
-    find_reference,
-    load_control,
-    prune,
-    record,
-    remove_message,
-    save_ledger,
-    summarize,
     tally_paused,
     today_key,
 )
@@ -70,7 +61,7 @@ from src.telegram.handlers import (
 _SEEN_CHATS: set = set()
 
 
-def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool) -> bool:
+def handle_message(msg: dict, cfg: dict, db: Ledger, token: str, edited: bool) -> bool:
     chat = msg.get("chat", {})
     chat_id = chat.get("id")
     is_private = (chat.get("type") or "") == "private"
@@ -101,7 +92,7 @@ def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool)
             return False
         # /search may contain spaces ("035 265"), so keep the whole argument.
         command_arg = text.split(None, 1)[1].strip() if len(parts) > 1 else ""
-        handle_command(cmd, command_arg, msg, cfg, ledger, token)
+        handle_command(cmd, command_arg, msg, cfg, db, token)
         return False
 
     if is_private:
@@ -127,8 +118,7 @@ def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool)
         # An edited amount message may become ordinary text. Remove its old
         # ledger row instead of leaving stale money in the day's total.
         if edited:
-            with LEDGER_LOCK:
-                removed = remove_message(ledger, chat_id, msg.get("message_id"))
+            removed = db.remove_message(chat_id, msg.get("message_id"))
             if removed:
                 print(
                     f"[edited-no-amount] chat={chat_id} msg={msg.get('message_id')} removed",
@@ -154,8 +144,7 @@ def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool)
 
     if invalid_amounts:
         if edited:
-            with LEDGER_LOCK:
-                remove_message(ledger, chat_id, msg.get("message_id"))
+            db.remove_message(chat_id, msg.get("message_id"))
         bad_str = ", ".join(fmt(a, cfg.get("currency_suffix", "")) for a in invalid_amounts)
         allowed_str = ", ".join(label(x) for x in allowed_denoms)
         send(
@@ -177,8 +166,7 @@ def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool)
 
     if cfg.get("require_reply", True) and (not reply or not reference):
         if edited:
-            with LEDGER_LOCK:
-                remove_message(ledger, chat_id, msg.get("message_id"))
+            db.remove_message(chat_id, msg.get("message_id"))
         send(
             token,
             chat_id,
@@ -215,9 +203,8 @@ def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool)
     # 3. Duplicate Prevention (One reference counted once per local day)
     if reference:
         removed_edited_row = False
-        with LEDGER_LOCK:
-            duplicate = find_reference(
-                ledger,
+        with LEDGER_LOCK:  # keep duplicate-check and record atomic
+            duplicate = db.find_reference(
                 day,
                 reference,
                 exclude_chat_id=chat_id,
@@ -225,9 +212,9 @@ def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool)
             )
             if duplicate:
                 if edited:
-                    removed_edited_row = remove_message(ledger, chat_id, msg.get("message_id"))
+                    removed_edited_row = db.remove_message(chat_id, msg.get("message_id"))
             else:
-                record(ledger, day, entry)
+                db.record(day, entry)
         if duplicate:
             duplicate_clock = datetime.fromtimestamp(duplicate["ts"], TZ).strftime("%H:%M")
             duplicate_amount = fmt(duplicate["total"], cfg.get("currency_suffix", ""))
@@ -246,8 +233,7 @@ def handle_message(msg: dict, cfg: dict, ledger: dict, token: str, edited: bool)
             )
             return removed_edited_row
     else:
-        with LEDGER_LOCK:
-            record(ledger, day, entry)
+        db.record(day, entry)
     return True
 
 
@@ -256,12 +242,12 @@ def run(cfg: dict) -> int:
     if not token:
         print("no bot token configured (use .env, TALLY_BOT_TOKEN or config.json)", file=sys.stderr)
         return 2
-    ledger = load_json(LEDGER_PATH, {})
-    cfg["_control"] = load_control()
-    offset = load_json(OFFSET_PATH, {}).get("offset", 0)
+    db = Ledger(DB_PATH)  # commits are immediate; no deferred save step
+    cfg["_control"] = db.load_control()
+    offset = db.get_offset()
     backoff = 1
-    dirty = False
     offset_dirty = False
+    last_prune_day: str | None = None
     stopping = threading.Event()
 
     def request_stop(signum: int, _frame: object) -> None:
@@ -278,7 +264,7 @@ def run(cfg: dict) -> int:
 
     print(f"[tally] started, offset={offset}, chats={cfg['allowed_chat_ids']}", flush=True)
     # Verification runs off the command path so replies stay instant.
-    threading.Thread(target=sweep_forever, args=(token, ledger, cfg), daemon=True).start()
+    threading.Thread(target=sweep_forever, args=(token, db, cfg), daemon=True).start()
 
     try:
         while not stopping.is_set():
@@ -305,7 +291,7 @@ def run(cfg: dict) -> int:
                     offset_dirty = True
                 if upd.get("callback_query"):
                     try:
-                        handle_callback(upd["callback_query"], cfg, ledger, token)
+                        handle_callback(upd["callback_query"], cfg, db, token)
                     except Exception as exc:
                         print(f"[callback] {type(exc).__name__}: {exc}", file=sys.stderr)
                     continue
@@ -313,29 +299,28 @@ def run(cfg: dict) -> int:
                 if not msg:
                     continue
                 try:
-                    if handle_message(msg, cfg, ledger, token, "edited_message" in upd):
-                        dirty = True
+                    handle_message(msg, cfg, db, token, "edited_message" in upd)
                 except Exception as exc:  # keep the daemon alive
                     print(f"[handle] {type(exc).__name__}: {exc}", file=sys.stderr)
-                    dirty = True  # the ledger may have been mutated mid-failure
 
-            if dirty:
-                with LEDGER_LOCK:
-                    prune(ledger)
-                    save_ledger(ledger)
-                dirty = False
             if offset_dirty:  # skip rewriting an unchanged offset every poll
-                save_json(OFFSET_PATH, {"offset": offset})
+                db.set_offset(offset)
                 offset_dirty = False
+            today = today_key()
+            if today != last_prune_day:  # roll retention once per local day
+                db.prune()
+                last_prune_day = today
     except KeyboardInterrupt:
         pass
     finally:
         # Persist whatever we saw so a restart neither reprocesses old updates
         # nor loses recorded amounts.
         with LEDGER_LOCK:
-            prune(ledger)
-            save_ledger(ledger)
-        save_json(OFFSET_PATH, {"offset": offset})
+            try:
+                db.prune()
+            finally:
+                db.set_offset(offset)
+                db.close()
         print("[tally] stopped cleanly, state saved", flush=True)
     return 0
 
@@ -361,15 +346,14 @@ def main() -> int:
     cfg = load_config()
     if args.verify is not None:
         day = args.verify or today_key()
-        ledger = load_json(LEDGER_PATH, {})
-        removed, checked = verify_day(cfg["bot_token"], ledger, day, cfg, budget_seconds=None)
-        save_ledger(ledger)
+        with Ledger(DB_PATH) as db:
+            removed, checked = verify_day(cfg["bot_token"], db, day, cfg, budget_seconds=None)
         print(f"{day}: checked {checked}, removed {removed}")
         return 0
     if args.report is not None:
-        ledger = load_json(LEDGER_PATH, {})
         day = args.report or today_key()
-        s = summarize(ledger, day, cfg)
+        with Ledger(DB_PATH) as db:
+            s = db.summarize(day, cfg)
         print(re.sub(r"</?b>|</?i>", "", render_details(s, cfg)))
         return 0
     if args.run:

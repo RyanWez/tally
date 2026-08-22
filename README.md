@@ -32,12 +32,13 @@ tally/
 ├── tally.py                  # Backward-compatible wrapper
 ├── README.md                 # Documentation
 ├── state/                    # Local persistent state (ignored in git)
+│   └── tally.db              # SQLite database (entries, offset, control)
 ├── tests/                    # Stdlib-only self-test suite (main.py --self-test)
 │   └── test_main.py
 └── src/                      # Source package
     ├── core/
     │   ├── config.py         # Zero-dependency .env loader, paths, TZ
-    │   └── ledger.py         # Ledger CRUD, JSON file IO, summarize, lock
+    │   └── ledger.py         # SQLite ledger (WAL), legacy JSON auto-import
     ├── parser/
     │   └── amount_parser.py  # Regex matching, phone normalization, reference resolution
     └── telegram/
@@ -120,6 +121,21 @@ python3 main.py --run
 | `/maintenance` | *(Owner only)* Temporarily pause tallying across all chats |
 | `/active` | *(Owner only)* Resume tallying after maintenance |
 | `/help` | Display command usage guide |
+
+---
+
+## 💾 Storage
+
+All state lives in a single SQLite file (`state/tally.db`, WAL mode):
+
+| Table | Contents |
+| :--- | :--- |
+| `entries` | One row per tallied message; PK `(chat_id, message_id)`; day-indexed for fast reports & duplicate checks |
+| `meta` | Telegram update offset + migration flag |
+| `control` | Maintenance flag and closed days |
+
+Writes commit immediately (no full-file rewrites), and edits/deletions are reconciled by primary key.
+If a legacy `state/ledger.json` / `offset.json` / `control.json` exists from an older version, it is imported once on first start — the original files stay untouched as a backup.
 
 ---
 
