@@ -1,8 +1,8 @@
 # 💰 Telegram Tally Bot (တဲလီ ဘော့တ်)
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Zero-Dependencies](https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-green.svg)]()
-[![License](https://img.shields.io/badge/License-MIT-orange.svg)]()
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
+![Zero-Dependencies](https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-green.svg)
+![License](https://img.shields.io/badge/License-MIT-orange.svg)
 
 A lightweight, **zero-dependency**, **zero-LLM** Telegram group amount tallying bot with robust Myanmar numeral support, phone reference tracking, message deletion detection, and strict business rule validation.
 
@@ -23,7 +23,7 @@ A lightweight, **zero-dependency**, **zero-LLM** Telegram group amount tallying 
 
 ## 📁 Directory Structure (ဖိုဒါ ဖွဲ့စည်းပုံ)
 
-```
+```text
 tally/
 ├── .env.example              # Environment variables template
 ├── .gitignore                # Git ignore rules
@@ -47,18 +47,22 @@ tally/
 ## 🚀 Quickstart (စတင် အသုံးပြုပုံ)
 
 ### 1. Clone the repository
+
 ```bash
 git clone https://github.com/your-username/tally.git
 cd tally
 ```
 
 ### 2. Configure Environment Variables
+
 Copy `.env.example` to `.env`:
+
 ```bash
 cp .env.example .env
 ```
 
 Edit `.env` and fill in your Bot Token and Owner ID:
+
 ```ini
 TALLY_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
 OWNER_IDS=123456789
@@ -69,6 +73,7 @@ ALLOWED_DENOMINATIONS=5000,10000,15000,20000,25000
 ```
 
 ### 3. Run the Bot
+
 ```bash
 # Run unit checks and self-tests
 python3 main.py --self-test
@@ -89,7 +94,7 @@ python3 main.py --run
 | `COUNT_ONLY_OWNER` | `bool` | `true` | If true, only tallies messages sent by `OWNER_IDS` |
 | `REQUIRE_REPLY` | `bool` | `true` | Only counts amounts that reply to a reference/phone message |
 | `STRICT_DENOMINATIONS` | `bool` | `true` | Strictly limits allowed values to `ALLOWED_DENOMINATIONS` |
-| `ALLOWED_DENOMINATIONS`| `list` | `5K,10K,15K,20K,25K` | Allowed denominations (e.g. `5000,10000,15000,20000,25000`) |
+| `ALLOWED_DENOMINATIONS` | `list` | `5K,10K,15K,20K,25K` | Allowed denominations (e.g. `5000,10000,15000,20000,25000`) |
 | `MIN_ALLOWED_AMOUNT` | `int` | `5000` | Minimum allowed amount if strict mode is disabled |
 | `MAX_ALLOWED_AMOUNT` | `int` | `25000` | Maximum allowed amount if strict mode is disabled |
 | `CURRENCY_SUFFIX` | `string` | `""` | Optional currency label (e.g., `MMK`, `ကျပ်`) |
@@ -120,11 +125,13 @@ python3 main.py --run
 To run the bot as a background service on Linux:
 
 1. Create a service file:
+
 ```bash
 sudo nano /etc/systemd/system/tally.service
 ```
 
 2. Add the configuration:
+
 ```ini
 [Unit]
 Description=Telegram Tally Bot Daemon
@@ -144,6 +151,7 @@ WantedBy=multi-user.target
 ```
 
 3. Enable and start:
+
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now tally
@@ -155,6 +163,7 @@ sudo systemctl status tally
 ## 🧪 Testing
 
 Run the built-in test suite:
+
 ```bash
 python3 main.py --self-test
 ```
@@ -163,4 +172,4 @@ python3 main.py --self-test
 
 ## 📄 License
 
-This project is open source and available under the [MIT License](LICENSE).
+This project is open source and available under the [MIT License](https://opensource.org/licenses/MIT).
