@@ -1,0 +1,24 @@
+# fly.toml — Tally Bot (Telegram long-poll worker)
+#
+# This bot only makes OUTBOUND connections (getUpdates), so there is
+# intentionally NO [http_service] section: Fly will not expect a port or
+# run health checks. Do not add an http_service block.
+app = "tally-bot"          # TODO: replace with your app name from `fly launch`
+primary_region = "sin"     # Singapore — low latency to Myanmar & Telegram
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  TZ = "Asia/Yangon"
+  # NEVER put TALLY_BOT_TOKEN here. Use:
+  #   fly secrets set TALLY_BOT_TOKEN=... OWNER_IDS=... ALLOWED_CHAT_IDS=...
+
+# Persistent SQLite storage (state/tally.db) survives deploys & restarts.
+[mounts]
+  source      = "tally_data"
+  destination = "/app/state"
+
+[vm]
+  size   = "shared-cpu-1x"
+  memory = "256mb"

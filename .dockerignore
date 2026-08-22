@@ -1,0 +1,17 @@
+# Secrets & local state must never enter the image
+.env
+.env.*
+state/
+*.db
+*.db-wal
+*.db-shm
+
+# Git & docs
+.git
+.gitignore
+README.md
+LICENSE
+
+# Python artifacts
+__pycache__/
+*.py[cod]
