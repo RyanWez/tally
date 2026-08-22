@@ -27,10 +27,13 @@ A lightweight, **zero-dependency**, **zero-LLM** Telegram group amount tallying 
 tally/
 ├── .env.example              # Environment variables template
 ├── .gitignore                # Git ignore rules
+├── LICENSE                   # MIT license
 ├── main.py                   # Primary application entrypoint & CLI runner
 ├── tally.py                  # Backward-compatible wrapper
 ├── README.md                 # Documentation
 ├── state/                    # Local persistent state (ignored in git)
+├── tests/                    # Stdlib-only self-test suite (main.py --self-test)
+│   └── test_main.py
 └── src/                      # Source package
     ├── core/
     │   ├── config.py         # Zero-dependency .env loader, paths, TZ

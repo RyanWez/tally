@@ -32,7 +32,7 @@ HELP = (
     "Automatically handles edits and message deletions.\n\n"
     "/total — Message count + grand total\n"
     "/details — Grouped breakdown by denomination (5K — 10 items ...)\n"
-    "/list — Message log (paginated)\n"
+    "/list — Message log with pagination (20 per page)\n"
     "/search 09672 — Search by phone/reference number\n"
     "/verify — Probe & clean up deleted messages\n"
     "/dayclose — Close today's ledger (Owner only)\n"
@@ -85,12 +85,14 @@ def list_page_count(s: dict, page_size: int = LIST_PAGE_SIZE) -> int:
 
 def list_keyboard(s: dict, page: int, page_size: int = LIST_PAGE_SIZE) -> dict:
     total_pages = list_page_count(s, page_size)
+    # Callbacks carry the rendered day so paging a past-day view stays on it.
+    day = s["day"]
     buttons = []
     if page > 1:
-        buttons.append({"text": "‹ Prev", "callback_data": f"tally:list:{page - 1}"})
+        buttons.append({"text": "‹ Prev", "callback_data": f"tally:list:{day}:{page - 1}"})
     buttons.append({"text": f"{page}/{total_pages}", "callback_data": "tally:noop"})
     if page < total_pages:
-        buttons.append({"text": "Next ›", "callback_data": f"tally:list:{page + 1}"})
+        buttons.append({"text": "Next ›", "callback_data": f"tally:list:{day}:{page + 1}"})
     return {"inline_keyboard": [buttons]}
 
 
@@ -292,14 +294,21 @@ def handle_callback(query: dict, cfg: dict, ledger: dict, token: str) -> None:
     data = query.get("data", "")
     if data == "tally:noop":
         return
-    match = re.fullmatch(r"tally:list:(\d+)", data)
+    # New format: tally:list:YYYY-MM-DD:N. Keyboards rendered before the day
+    # was embedded (plain tally:list:N) fall back to today.
+    match = re.fullmatch(r"tally:list:(\d{4}-\d{2}-\d{2}):(\d+)", data)
+    if match:
+        day, page = match.group(1), max(1, int(match.group(2)))
+    else:
+        legacy = re.fullmatch(r"tally:list:(\d+)", data)
+        if not legacy:
+            return
+        day, page = today_key(), max(1, int(legacy.group(1)))
     message = query.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
     message_id = message.get("message_id")
-    if not match or not chat_id or not message_id:
+    if not chat_id or not message_id:
         return
-    page = max(1, int(match.group(1)))
-    day = today_key()
     summary = summarize(ledger, day, cfg)
     text = render_list(summary, cfg, page=page)
     edit_list_message(token, chat_id, message_id, text, list_keyboard(summary, page))

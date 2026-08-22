@@ -117,18 +117,22 @@ def verify_day(
                 )
             )
             stamp = time.time()
-            for row, alive in zip(batch, results):
-                checked += 1
-                if alive is False:
-                    doomed.append(id(row))
-                    print(
-                        f"[deleted] day={day} msg={row.get('message_id')} "
-                        f"total={row.get('total')} dropped",
-                        flush=True,
-                    )
-                elif alive is True:
-                    row["vat"] = int(stamp)
-                # alive is None -> leave vat alone, retry next pass
+            # Row dicts are shared with the polling/sweep threads, so mutate
+            # them under the lock; otherwise save_ledger can serialize a
+            # half-updated row set.
+            with LEDGER_LOCK:
+                for row, alive in zip(batch, results):
+                    checked += 1
+                    if alive is False:
+                        doomed.append(id(row))
+                        print(
+                            f"[deleted] day={day} msg={row.get('message_id')} "
+                            f"total={row.get('total')} dropped",
+                            flush=True,
+                        )
+                    elif alive is True:
+                        row["vat"] = int(stamp)
+                    # alive is None -> leave vat alone, retry next pass
 
     if doomed:
         dead = set(doomed)
