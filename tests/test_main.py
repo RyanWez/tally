@@ -25,6 +25,7 @@ from src.parser.amount_parser import (
 from src.telegram.handlers import (
     _footer,
     handle_callback,
+    handle_command,
     list_keyboard,
     render_details,
     render_list,
@@ -57,6 +58,7 @@ def seed(db: Ledger, day: str, rows: list[dict], chat_id: int = -1004417247378) 
                 "ts": r.get("ts", 0),
                 "sender_id": r.get("sender_id"),
                 "sender_name": r.get("sender_name"),
+                "username": r.get("username"),
                 "amounts": r.get("amounts", [r.get("total", 0)]),
                 "total": r.get("total", 0),
                 "edited": bool(r.get("edited")),
@@ -462,6 +464,115 @@ def run() -> int:
     ok = ok and tally_paused(control_cfg, "2026-08-23")
     failed += 0 if ok else 1
     print(f"{'ok  ' if ok else 'FAIL'} dayclose/maintenance pause semantics")
+
+    # Per-sender breakdown: /total & /details accept @username, name, or ID,
+    # and the username column survives a reopen (fresh + migrated legacy DB).
+    sf_db = make_db("senderfilter")
+    seed(sf_db, "d", [
+        {"total": 10000, "amounts": [10000], "ts": 1, "vat": 1, "message_id": 1,
+         "sender_id": 1, "sender_name": "Alice", "username": "alice"},
+        {"total": 25000, "amounts": [25000], "ts": 2, "vat": 1, "message_id": 2,
+         "sender_id": 2, "sender_name": "Bob", "username": "bob"},
+        {"total": 5000, "amounts": [5000], "ts": 3, "vat": 1, "message_id": 3,
+         "sender_id": 1, "sender_name": "Alice", "username": "alice"},
+    ])
+    fcfg = {"count_only_owner": False, "owner_ids": [], "currency_suffix": ""}
+    by_uname = sf_db.summarize("d", fcfg, sender="alice")
+    by_at = sf_db.summarize("d", fcfg, sender="@Bob")
+    by_id = sf_db.summarize("d", fcfg, sender="1")
+    by_sub = sf_db.summarize("d", fcfg, sender="ali")
+    everyone = sf_db.summarize("d", fcfg)
+    ok = (
+        by_uname["messages"] == 2 and by_uname["total"] == 15000
+        and by_at["messages"] == 1 and by_at["total"] == 25000
+        and by_id["messages"] == 2
+        and by_sub["messages"] == 2
+        and everyone["total"] == 40000
+        and sf_db.rows_for_day("d")[0]["username"] == "alice"
+    )
+    failed += 0 if ok else 1
+    print(f"{'ok  ' if ok else 'FAIL'} per-sender summarize (@user/name/id/substring)")
+
+    # A pre-username legacy database gains the column automatically on open.
+    import sqlite3 as _sqlite3
+    legacy_dir = _TMP_ROOT / f"tally-oldschema-{int(time.time()*1000)}"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    old_path = legacy_dir / "tally.db"
+    oconn = _sqlite3.connect(str(old_path))
+    oconn.executescript("""
+        CREATE TABLE IF NOT EXISTS entries (
+            chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+            day TEXT NOT NULL, ts INTEGER NOT NULL,
+            sender_id INTEGER, sender_name TEXT, amounts TEXT NOT NULL,
+            total INTEGER NOT NULL, edited INTEGER NOT NULL DEFAULT 0,
+            vat INTEGER NOT NULL DEFAULT 0, reply_to_message_id INTEGER,
+            reference_number TEXT, original_text TEXT, reply_text TEXT,
+            quote_text TEXT, PRIMARY KEY (chat_id, message_id)
+        );
+        CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS control (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    """)
+    oconn.execute(
+        "INSERT INTO entries (chat_id, message_id, day, ts, sender_id, sender_name,"
+        " amounts, total) VALUES (-100, 5, '2026-08-20', 1758000000, 9, 'Old', '[5000]', 5000)"
+    )
+    oconn.commit()
+    oconn.close()
+    with Ledger(old_path, import_legacy=False) as odb:
+        cols = {r[1] for r in odb.conn.execute("PRAGMA table_info(entries)").fetchall()}
+        orow = odb.rows_for_day("2026-08-20")[0]
+        ok = "username" in cols and orow["username"] is None and orow["total"] == 5000
+    failed += 0 if ok else 1
+    print(f"{'ok  ' if ok else 'FAIL'} legacy DB auto-migrates username column")
+
+    # Owner-only correction commands: /undo removes the newest tally of the day;
+    # /delete targets one entry by (partial) reference and hints on misses.
+    undo_db = make_db("undo")
+    today_d = today_key()
+    seed(undo_db, today_d, [
+        {"total": 10000, "amounts": [10000], "ts": now - 60, "vat": 1, "message_id": 501,
+         "reference_number": "09670000001", "sender_id": 8777968077, "username": "first"},
+        {"total": 25000, "amounts": [25000], "ts": now - 10, "vat": 1, "message_id": 502,
+         "reference_number": "09670000002", "sender_id": 1860905954, "username": "second"},
+    ])
+    ucfg = {
+        "_control": {"maintenance": False, "closed_days": []},
+        "count_only_owner": False, "owner_ids": [8777968077],
+        "currency_suffix": "", "verify_on_read": False,
+    }
+    umsg = {"chat": {"id": -1004417247378}, "from": {"id": 8777968077}, "message_id": 999}
+    sent_replies: list[str] = []
+    real_handler_send = handlers_mod.send
+    handlers_mod.send = lambda token, chat_id, text, *a, **k: sent_replies.append(text) or {"ok": True}
+    real_chat_action = handlers_mod.chat_action
+    handlers_mod.chat_action = lambda *a, **k: None
+    try:
+        handle_command("/undo", "", umsg, ucfg, undo_db, "unused")          # newest -> second's 25K
+        after_undo = undo_db.rows_for_day(today_d)
+        handle_command("/delete", "70000001", umsg, ucfg, undo_db, "unused")  # suffix match first's 10K
+        after_delete = undo_db.rows_for_day(today_d)
+        handle_command("/delete", "1234567890", umsg, ucfg, undo_db, "unused")  # miss -> hint
+        non_owner_msg = dict(umsg, **{"from": {"id": 42}})
+        before_guard = total_rows(undo_db)
+        handle_command("/delete", "09670000001", non_owner_msg, ucfg, undo_db, "unused")
+        guard_ok = total_rows(undo_db) == before_guard and len(sent_replies) == 3
+        # Closed day refuses corrections.
+        ucfg["_control"]["closed_days"].append(today_d)
+        handle_command("/undo", "", umsg, ucfg, undo_db, "unused")
+        closed_ok = "closed" in sent_replies[-1]
+    finally:
+        handlers_mod.send = real_handler_send
+        handlers_mod.chat_action = real_chat_action
+    ok = (
+        len(after_undo) == 1 and after_undo[0]["total"] == 10000
+        and not after_delete
+        and guard_ok and closed_ok
+        and "25,000" in sent_replies[0] and "@second" in sent_replies[0]
+        and "Deleted" in sent_replies[1] and "@first" in sent_replies[1]
+        and "Not found" in sent_replies[2]
+    )
+    failed += 0 if ok else 1
+    print(f"{'ok  ' if ok else 'FAIL'} /undo + /delete: owner-gated, closed-day guarded, ref-targeted")
 
     print(f"\n{'all passed' if not failed else str(failed) + ' FAILED'}")
     return 1 if failed else 0

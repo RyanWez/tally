@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import html
 import re
 import threading
 from datetime import datetime
 
 from src.core.config import TZ
-from src.core.ledger import control_state, today_key
+from src.core.ledger import control_state, sender_matches, today_key
 from src.parser.amount_parser import fmt, label, normalize_search
 from src.telegram.client import (
     answer_callback,
@@ -18,16 +19,21 @@ from src.telegram.client import (
 )
 
 LIST_PAGE_SIZE = 20
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 HELP = (
     "💰 <b>Tally Bot</b>\n"
     "Daily expense & amount tallying from chat messages (e.g. 10K / 25K / 5,000).\n"
     "Automatically handles edits and message deletions.\n\n"
     "/total — Message count + grand total\n"
+    "/total @Alice — One person's count & total\n"
     "/details — Grouped breakdown by denomination (5K — 10 items ...)\n"
+    "/details @Alice — Breakdown for one person\n"
     "/list — Message log with pagination (20 per page)\n"
     "/search 09672 — Search by phone/reference number\n"
     "/verify — Probe & clean up deleted messages\n"
+    "/undo [date] — Remove the most recent tally of the day (Owner only)\n"
+    "/delete 09672... — Delete a wrong entry by reference (Owner only)\n"
     "/dayclose — Close today's ledger (Owner only)\n"
     "/dayopen — Reopen a closed day's ledger (Owner only)\n"
     "/maintenance — Temporarily pause tallying (Owner only)\n"
@@ -47,9 +53,11 @@ def _footer(s: dict, cfg: dict) -> str:
 def render_total(s: dict, cfg: dict) -> str:
     cur = cfg["currency_suffix"]
     if not s["messages"]:
-        return f"📊 {s['day']} — No tally messages recorded yet."
+        who = f" for <i>{html.escape(str(s['sender_label']))}</i>" if s.get("sender_label") else ""
+        return f"📊 {s['day']} —{who} No tally messages recorded yet."
+    who = f" — <i>{html.escape(str(s['sender_label']))}</i>" if s.get("sender_label") else ""
     return (
-        f"📊 <b>{s['day']}</b>\n"
+        f"📊 <b>{s['day']}</b>{who}\n"
         f"Messages: <b>{s['messages']}</b>\n"
         f"Total: <b>{fmt(s['total'], cur)}</b>" + _footer(s, cfg)
     )
@@ -58,9 +66,10 @@ def render_total(s: dict, cfg: dict) -> str:
 def render_details(s: dict, cfg: dict) -> str:
     """Grouped breakdown: one line per denomination, not per message."""
     cur = cfg["currency_suffix"]
+    who = f" — <i>{html.escape(str(s['sender_label']))}</i>" if s.get("sender_label") else ""
     if not s["messages"]:
-        return f"📋 {s['day']} — No records found."
-    lines = [f"📋 <b>{s['day']} Details</b>"]
+        return f"📋 {s['day']}{who} — No records found."
+    lines = [f"📋 <b>{s['day']} Details</b>{who}"]
     for amount in sorted(s["buckets"], reverse=True):
         count = s["buckets"][amount]
         lines.append(f"{label(amount)} — <b>{count}</b> item{'s' if count != 1 else ''} = {fmt(amount * count, cur)}")
@@ -141,6 +150,31 @@ def render_search(db, query: str, cfg: dict, day: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def parse_query(arg: str) -> tuple[str, str]:
+    """Split a command argument into (sender_query, day).
+
+    Accepts any order: "/details @Alice 2026-08-21" or "/total 2026-08-21".
+    """
+    sender = ""
+    day = ""
+    for tok in arg.split():
+        if _DATE_RE.fullmatch(tok):
+            day = tok
+        elif not sender:
+            sender = tok.lstrip("@")
+    return sender, day or today_key()
+
+
+def resolve_sender_label(db, day: str, query: str) -> str:
+    """Best display name for a sender query, as recorded in the ledger."""
+    for row in db.rows_for_day(day):
+        if sender_matches(row, query):
+            if row.get("username"):
+                return f"@{row['username']}"
+            return row.get("sender_name") or f"@{query}"
+    return f"@{query}"
+
+
 def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, db, token: str) -> None:
     chat_id = msg.get("chat", {}).get("id")
     thread_id = msg.get("message_thread_id")
@@ -150,10 +184,124 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, db, token: str) -> 
     owners = cfg["owner_ids"]
 
     # Control commands are owner-only and persist across service restarts.
-    if cmd in ("/dayclose", "/dayopen", "/maintenance", "/active"):
+    if cmd in ("/dayclose", "/dayopen", "/maintenance", "/active", "/undo", "/delete"):
         sender_id = (msg.get("from") or {}).get("id")
         if owners and sender_id not in owners:
             return
+        cur = cfg.get("currency_suffix", "")
+
+        def closed_guard(target_day: str) -> bool:
+            if target_day in control.get("closed_days", []):
+                chat_action(token, chat_id)
+                send(
+                    token,
+                    chat_id,
+                    f"🔒 Tally for {target_day} is closed. Use /dayopen before making changes.",
+                    reply_to,
+                    thread_id,
+                )
+                return True
+            return False
+
+        if cmd == "/undo":
+            if closed_guard(day):
+                return
+            row = db.latest_row(chat_id, day)
+            if not row:
+                send(
+                    token,
+                    chat_id,
+                    f"↩️ {day} — Nothing to undo.",
+                    reply_to,
+                    thread_id,
+                )
+                return
+            db.remove_message(row["chat_id"], row["message_id"])
+            clock = datetime.fromtimestamp(row["ts"], TZ).strftime("%H:%M")
+            ref = f" {row['reference_number']}" if row.get("reference_number") else ""
+            who = f"@{row['username']}" if row.get("username") else (row.get("sender_name") or "?")
+            after = db.summarize(day, cfg)
+            chat_action(token, chat_id)
+            send(
+                token,
+                chat_id,
+                f"↩️ Undone: {clock}{ref} — <b>{fmt(row['total'], cur)}</b> by {html.escape(str(who))}\n"
+                f"{day} total now: <b>{fmt(after['total'], cur)}</b> ({after['messages']} message{'s' if after['messages'] != 1 else ''})",
+                reply_to,
+                thread_id,
+            )
+            print(f"[undo] day={day} msg={row.get('message_id')} removed={row['total']}", flush=True)
+            return
+
+        if cmd == "/delete":
+            del_ref, del_day = "", day
+            for tok in arg.split():
+                if _DATE_RE.fullmatch(tok):
+                    del_day = tok
+                elif not del_ref:
+                    del_ref = tok
+            needle = normalize_search(del_ref)
+            if len(needle) < 5:
+                send(
+                    token,
+                    chat_id,
+                    "Usage: <b>/delete &lt;phone/reference&gt;</b> [YYYY-MM-DD]\n"
+                    "Example: /delete 09675362816",
+                    reply_to,
+                    thread_id,
+                )
+                return
+            if closed_guard(del_day):
+                return
+            hits = db.rows_matching_reference(chat_id, needle, del_day)
+            if len(hits) > 1:  # partial needle matched several rows; ask to be specific
+                lines = [f"🔎 {len(hits)} entries match <b>{needle}</b> — use a fuller number:"]
+                for r in sorted(hits, key=lambda x: x.get("ts", 0), reverse=True):
+                    clock = datetime.fromtimestamp(r["ts"], TZ).strftime("%H:%M")
+                    lines.append(f"{clock} {r.get('reference_number') or '?'} — <b>{fmt(r['total'], cur)}</b>")
+                send(token, chat_id, "\n".join(lines), reply_to, thread_id)
+                return
+            if not hits:
+                other_days = sorted({
+                    d
+                    for d in db.day_keys()
+                    if d != del_day
+                    for r in db.rows_matching_reference(chat_id, needle, d)
+                })
+                hint = (
+                    f"\nFound on: {', '.join(other_days)}\nUse /delete {del_ref} <date>."
+                    if other_days
+                    else ""
+                )
+                send(
+                    token,
+                    chat_id,
+                    f"🔎 <b>{needle}</b> — Not found on {del_day}.{hint}",
+                    reply_to,
+                    thread_id,
+                )
+                return
+            row = hits[0]
+            db.remove_message(row["chat_id"], row["message_id"])
+            clock = datetime.fromtimestamp(row["ts"], TZ).strftime("%H:%M")
+            who = f"@{row['username']}" if row.get("username") else (row.get("sender_name") or "?")
+            after = db.summarize(del_day, cfg)
+            chat_action(token, chat_id)
+            send(
+                token,
+                chat_id,
+                f"🗑 Deleted: {clock} {row.get('reference_number') or '?'} — "
+                f"<b>{fmt(row['total'], cur)}</b> (by {html.escape(str(who))})\n"
+                f"{del_day} total now: <b>{fmt(after['total'], cur)}</b> ({after['messages']} message{'s' if after['messages'] != 1 else ''})",
+                reply_to,
+                thread_id,
+            )
+            print(
+                f"[delete] day={del_day} msg={row.get('message_id')} ref={row.get('reference_number')} removed={row['total']}",
+                flush=True,
+            )
+            return
+
         if cmd == "/dayclose":
             if day not in control["closed_days"]:
                 control["closed_days"].append(day)
@@ -252,7 +400,13 @@ def handle_command(cmd: str, arg: str, msg: dict, cfg: dict, db, token: str) -> 
     chat_action(token, chat_id)
     if cfg["verify_on_read"]:
         removed, _ = verify_day(token, db, day, cfg, cfg["verify_budget_seconds"])
-    s = db.summarize(day, cfg)
+    if cmd in ("/total", "/details"):
+        who, view_day = parse_query(arg)
+        s = db.summarize(view_day, cfg, sender=who or None)
+        if who:
+            s["sender_label"] = resolve_sender_label(db, view_day, who)
+    else:
+        s = db.summarize(day, cfg)
     note = f"\n<i>({removed} deleted message{'s' if removed != 1 else ''} removed)</i>" if removed else ""
 
     if cmd == "/total":

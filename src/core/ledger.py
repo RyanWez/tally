@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS entries (
     ts                  INTEGER NOT NULL,
     sender_id           INTEGER,
     sender_name         TEXT,
+    username            TEXT,
     amounts             TEXT    NOT NULL,
     total               INTEGER NOT NULL,
     edited              INTEGER NOT NULL DEFAULT 0,
@@ -69,6 +70,7 @@ _ROW_COLUMNS = (
     "ts",
     "sender_id",
     "sender_name",
+    "username",
     "amounts",
     "total",
     "edited",
@@ -108,6 +110,22 @@ def tally_paused(cfg: dict, day: str) -> bool:
     return bool(control.get("maintenance") or day in control.get("closed_days", []))
 
 
+def sender_matches(row: dict, query: str) -> bool:
+    """Does a ledger row belong to the queried person?
+
+    Accepts @username, stored display name (exact first, substring second),
+    or numeric Telegram ID.
+    """
+    q = (query or "").strip().lstrip("@").lower()
+    if not q:
+        return True
+    if q.isdigit():
+        return str(row.get("sender_id") or "") == q
+    uname = (row.get("username") or "").lower()
+    name = (row.get("sender_name") or "").lower()
+    return q == uname or q == name or q in name or (bool(uname) and q in uname)
+
+
 class Ledger:
     """Single-file SQLite ledger. All access is serialized via LEDGER_LOCK."""
 
@@ -122,8 +140,15 @@ class Ledger:
         self.conn.execute("PRAGMA busy_timeout=5000")
         with LEDGER_LOCK:
             self.conn.executescript(_SCHEMA)
+            self._ensure_columns()
             if import_legacy:
                 self._import_legacy()
+
+    def _ensure_columns(self) -> None:
+        """Add columns introduced after the original schema (idempotent)."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(entries)").fetchall()}
+        if "username" not in cols:
+            self.conn.execute("ALTER TABLE entries ADD COLUMN username TEXT")
 
     # ------------------------------------------------------------- lifecycle
     def close(self) -> None:
@@ -146,6 +171,7 @@ class Ledger:
             int(entry.get("ts") or 0),
             entry.get("sender_id"),
             entry.get("sender_name"),
+            entry.get("username"),
             json.dumps(entry.get("amounts") or []),
             int(entry.get("total") or 0),
             int(bool(entry.get("edited"))),
@@ -241,6 +267,31 @@ class Ledger:
             ).fetchall()
         return [r[0] for r in rows]
 
+    def latest_row(self, chat_id, day: str) -> dict | None:
+        """Newest row for a chat on a day (tie-break: higher message_id)."""
+        cols = ", ".join(_ROW_COLUMNS)
+        with LEDGER_LOCK:
+            row = self.conn.execute(
+                f"SELECT {cols} FROM entries WHERE chat_id = ? AND day = ? "
+                "ORDER BY ts DESC, message_id DESC LIMIT 1",
+                (chat_id, day),
+            ).fetchone()
+        return _row_to_dict(row) if row else None
+
+    def rows_matching_reference(self, chat_id, needle: str, day: str | None = None) -> list[dict]:
+        """Rows for one chat whose stored reference matches the digit needle.
+
+        day=None scans every recorded day (used to hint where a reference lives).
+        """
+        hits: list[dict] = []
+        for d in [day] if day else self.day_keys():
+            for row in self.rows_for_day(d):
+                if row.get("chat_id") != chat_id:
+                    continue
+                if is_reference_match(needle, row.get("reference_number")):
+                    hits.append(row)
+        return hits
+
     def find_reference(
         self,
         day: str,
@@ -310,10 +361,12 @@ class Ledger:
             ).fetchall()
         return [_row_to_dict(r) for r in rows]
 
-    def summarize(self, day: str, cfg: dict) -> dict:
+    def summarize(self, day: str, cfg: dict, sender: str | None = None) -> dict:
         rows = self.rows_for_day(day)
         if cfg.get("count_only_owner") and cfg.get("owner_ids"):
             rows = [r for r in rows if r.get("sender_id") in cfg["owner_ids"]]
+        if sender:
+            rows = [r for r in rows if sender_matches(r, sender)]
         counted = [r for r in rows if r.get("total", 0) > 0]
         buckets: dict[int, int] = {}
         for r in counted:

@@ -189,6 +189,7 @@ def handle_message(msg: dict, cfg: dict, db: Ledger, token: str, edited: bool) -
         "ts": ts,
         "sender_id": sender_id,
         "sender_name": sender.get("first_name") or sender.get("username") or str(sender_id),
+        "username": sender.get("username"),
         "amounts": amounts,
         "total": sum(amounts),
         "edited": bool(edited),
